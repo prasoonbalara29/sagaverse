@@ -20,6 +20,9 @@ spring:
       # Offsets are committed only after the DB transaction commits (ADR-0005).
       enable-auto-commit: false
       auto-offset-reset: earliest
+    listener:
+      # One record at a time. The offset is committed after the handler (and its DB transaction) returns.
+      ack-mode: record
     producer:
       acks: all
       properties:
@@ -30,6 +33,10 @@ spring:
       use-big-decimal-for-floats: true
     serialization:
       write-dates-as-timestamps: false
+
+# naive: dual write, no dedup. reliable (Phase 4): outbox + inbox (ADR-0010).
+saga:
+  mode: naive
 
 management:
   endpoints:

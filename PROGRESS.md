@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 2a (orchestrator + order API) — done. Next: 2b (handlers + e2e)
+## Current phase: 2b (payment + inventory handlers) — done. Next: 2c (e2e module)
 
 ### Phase checklist
 
@@ -11,13 +11,49 @@
 | 1b | `compose.yaml` (Postgres + 3 DBs/users, Kafka KRaft, topics-init), Makefile | ✅ done |
 | 1c | 3 service skeletons, Flyway V1, actuator health, `*ApplicationIT` (Testcontainers) | ✅ done |
 | 2a | Order API, orchestrator state machine (happy path), naive publisher, reply listener, `OrderSagaHappyPathIT` | ✅ done |
-| 2b | Payment + inventory command handlers, `e2e-tests` module, `HappyPathE2EIT`, `requests.http` | ⏳ next |
+| 2b | Payment + inventory command handlers (naive), per-service command ITs | ✅ done |
+| 2c | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ⏳ next |
 | 3 | Declines and compensations (F1, F2, F7 naive) | pending |
 | 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 2b (payment-service and inventory-service)
+- **payment-service `PaymentService`**: `ChargePayment` appends a `CHARGE` ledger row, upserts the per-saga `payment` row
+  (CHARGED) and replies `PaymentCharged(paymentId, amount)`. **Naive**: no dedup. Each delivery adds another ledger
+  row, and the upsert hides the repeat. That's F3, demonstrated in Phase 4. `RefundPayment` is logged and ignored
+  until Phase 3.
+- **inventory-service `InventoryService`**: `ReserveStock` does an atomic `UPDATE stock … WHERE available >= qty`.
+  On success it upserts a reservation (naive: the quantity is *added*, so a duplicate doubles the hold) and replies
+  `StockReserved`. Otherwise it replies `StockUnavailable(OUT_OF_STOCK)` and touches nothing. `ReleaseStock` is
+  logged and ignored until Phase 3.
+- Each service has its own copy of `EnvelopeCodec` (plus a `decode(json, PaymentCommand.class)` overload that
+  rejects a message from the wrong family), `MessagePublisher`, `DirectKafkaPublisher` (naive, after-commit
+  send), `AppConfig` (Clock + exact-decimal Jackson) and a `CommandListener` that sets `orderId`/`sagaId` in MDC.
+  The copies are deliberate (ADR-0001).
+- `application.yml`: `ack-mode: record`, `saga.mode: naive`.
+- Tests: `PaymentCommandsIT` (1) and `InventoryCommandsIT` (2). In each, the test plays the orchestrator over real Kafka.
+- 17 files touched, counting PROGRESS.md.
+
+### Predict, then run (2b)
+Predicted:
+- payment: a `PaymentCharged` reply with the same sagaId, the reply's paymentId equal to the DB row's,
+  `payment.status = CHARGED`, exactly 1 `ledger` row `CHARGE 42.50`.
+- inventory: SKU-1×2 gives `StockReserved`, stock 100→98, reservation RESERVED qty 2.
+  SKU-EMPTY×1 gives `StockUnavailable(OUT_OF_STOCK)`, stock stays 0, no reservation row.
+
+Result: **matched.**
+
+```
+$ make verify
+Tests run: 18 EnvelopeTest | 8 SagaStateMachineTest | 5 EnvelopeCodecTest
+Tests run: 3 OrderServiceApplicationIT | 3 OrderSagaHappyPathIT
+Tests run: 3 PaymentServiceApplicationIT | 1 PaymentCommandsIT
+Tests run: 4 InventoryServiceApplicationIT | 2 InventoryCommandsIT
+BUILD SUCCESS   (53 tests)
+```
 
 ### Done in Phase 2a (order-service only; payment and inventory handlers come in 2b)
 - **`SagaStateMachine`**: a pure function from (saga, reply) to `Decision` (from, to, trigger, next step,
@@ -42,7 +78,7 @@
   a `Clock` bean, and a Jackson customizer for exact-BigDecimal tree nodes (the open issue from 1b, now closed).
 - Tests: `SagaStateMachineTest` (8), `EnvelopeCodecTest` (5), `OrderSagaHappyPathIT` (3, with the test playing
   payment and inventory over real Kafka).
-- 18 files touched (above the ~15 guideline). The state machine, orchestrator and their tests are one unit,
+- 19 files touched, counting PROGRESS.md (above the ~15 guideline). The state machine, orchestrator and their tests are one unit,
   and splitting them would leave a phase that can't be tested end to end.
 
 ### Predict, then run: `OrderSagaHappyPathIT`
@@ -196,7 +232,7 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   `~/.m2/settings.xml` mirror.
 
 ### Open issues
-- payment and inventory still need the same exact-BigDecimal Jackson customizer (2b).
+- Kafka client config dumps (INFO) clutter the ECS logs. Phase 6 will set `org.apache.kafka` to WARN.
 - `DefaultErrorHandler` + DLT routing for `MessageRejectedException` isn't wired yet (Phase 3). Today a poison reply
   is retried by Spring Kafka's default backoff (10 attempts), then skipped and logged.
 - Jib runs on the host JDK. Pulling the base image from `docker.intuit.com` should work, but that's untested until Phase 5.
@@ -204,6 +240,6 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 2b: payment-service `ChargePayment` handler (fake gateway, ledger) and inventory-service `ReserveStock` handler
-(stock decrement, reservation), both naive. Then the `e2e-tests` module booting all three apps in one JVM, `HappyPathE2EIT`,
-and `requests.http`.
+Phase 2c: the `e2e-tests` module boots order, payment and inventory in one JVM (separate contexts and DBs) against
+one Testcontainers Kafka + Postgres. `HappyPathE2EIT` places an order over HTTP and asserts the final state of all three
+DBs. Plus `requests.http`.
