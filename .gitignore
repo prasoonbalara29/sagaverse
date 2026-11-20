@@ -1,0 +1,24 @@
+# Build output
+target/
+*.class
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+
+# Local, machine-specific config (never commit)
+.java-home
+.env
+*.local.yml
+application-local.yml
+
+# Maven wrapper binary is downloaded on demand
+.mvn/wrapper/maven-wrapper.jar

@@ -1,0 +1,45 @@
+# ADR-0007: Retry and dead-letter strategy for poison messages
+
+- Status: Accepted
+- Date: 2026-11-20
+
+## Context
+
+Some messages fail when processed. Some failures are **transient**: a DB blip, or a gateway that
+fails at random. Others are **permanent**: unparseable JSON, an unknown message `type`, an
+unsupported `version`, or an invalid payload. A permanent failure retried forever blocks its
+partition, so every later order on that partition stalls behind it. This is called the "poison
+pill".
+
+## Decision
+
+- **Deserialization:** `ErrorHandlingDeserializer` wraps the JSON deserializer, so a bad record
+  reaches the error handler instead of crashing the consumer loop.
+- **Retries:** Spring Kafka `DefaultErrorHandler` with **blocking** `ExponentialBackOff`: 3 attempts,
+  at 1s, then 2s, then 4s. Blocking means the partition waits, which keeps per-order ordering intact
+  (ADR-0002).
+- **Non-retryable** exceptions skip the backoff and go straight to the DLT:
+  `DeserializationException`, `UnknownMessageTypeException`, `UnsupportedVersionException`, and
+  validation failures.
+- **Dead letter:** `DeadLetterPublishingRecoverer` sends the record to `<topic>.DLT` (3 partitions,
+  same key). Headers carry the original topic, partition, offset and the exception. The offset is
+  then committed, so the partition moves on.
+- **Business recovery:** a command in the DLT never gets a reply. The saga's step deadline expires,
+  and the sweeper re-sends the command or compensates (ADR-0009, ADR-0008). The business flow stays
+  consistent even with poison input.
+- **Replay:** manual only, documented in the README (`kafka-console-consumer` piped into
+  `kafka-console-producer` after a fix). Automated replay is out of scope.
+
+## Consequences
+
+- A poison message costs at most about 7s of partition stall before it's moved aside.
+- Transient failures that last longer than the backoff end up in the DLT too. The saga's own
+  re-send logic then gives them another chance with a fresh message.
+
+## Alternatives rejected
+
+- **Non-blocking retry topics (`@RetryableTopic`):** the failing record leaves its partition, so
+  later messages for the same orderId can be processed first. That breaks per-order ordering, for
+  example a Refund overtaking a Charge.
+- **Infinite retry:** a single poison pill stalls every order on its partition.
+- **Log and skip:** silent data loss, and nothing is left to inspect.
