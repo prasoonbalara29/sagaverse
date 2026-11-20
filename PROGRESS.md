@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 5a (timeout sweeper) — done. Next: 5b (F8 failing refunds, F9 late reply)
+## Current phase: 5b (F8, F9) — done. Next: 5c (containers, chaos demo)
 
 ### Phase checklist
 
@@ -20,11 +20,53 @@
 | 4a | Transactional outbox + relay in all services, FaultInjector, InvariantChecker, F4 naive vs reliable | ✅ done |
 | 4b | Inbox + sagaId business idempotency, F3 naive vs reliable, default mode → reliable | ✅ done |
 | 5a | Timeout sweeper + state machine timeouts + late-reservation rule, F5/F6 naive vs reliable | ✅ done |
-| 5b | F8 (refund fails transiently / forever → COMPENSATION_FAILED), F9 (late reservation after cancellation) | ⏳ next |
-| 5c | Jib images, `make up-all`, `make chaos-inventory`, `make demo` | pending |
+| 5b | F8 (refund fails transiently / forever → COMPENSATION_FAILED), F9 (late reservation after cancellation) | ✅ done |
+| 5c | Jib images, `make up-all`, `make chaos-inventory`, `make demo` | ⏳ next |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 5b (F8 failing refunds, F9 late reservation)
+- `payment.refund-fail-times=N`: the first N refunds throw a retryable `GatewayUnavailableException` (`FakeGateway.refund`,
+  called before the ledger write, so the transaction and inbox row roll back). Refunds can be delayed but never declined (ADR-0008).
+- Scenarios:
+  - `refundFailsTransiently(N, settle)` restarts payment with N, runs an out-of-stock order, then restarts payment healthy.
+  - `lateReservationAfterCancellation()`: the saga is COMPENSATED, SKU-EMPTY is restocked to 5, then a ReserveStock resend
+    (new eventId) arrives. `emptySkuEmpty()` undoes the restock.
+- e2e cluster config: order `max-compensation-attempts` 20 → 5, payment `messaging.retry.initial-interval` 100ms.
+- ADR-0009's test-config column now shows the real e2e values (2s / 3 / 5 / 500ms). It had listed values never used.
+  ADR-0008 names `refund-fail-times`.
+
+**Step 1: prove the problem** (reliable assertions run in naive mode):
+```
+f8 (N=5):    expected: "COMPENSATED"          but was: "COMPENSATING"
+f8 (N=1000): expected: "COMPENSATION_FAILED"  but was: "COMPENSATING"
+f9: passes (as predicted; the late-reservation rule is in the shared state machine)
+[ERROR] Tests run: 10, Failures: 7   (f3a, f3b, f4, f5, f6 as before)
+```
+**Step 2:** reliable mode needed no new production code for F8. The 5a sweeper's compensation resend handles it. 5b added the
+failure trigger and the tests.
+
+**Step 3: green.** Predicted: N=5 gives 4 failed deliveries → DLT → sweeper resend ~2 s later → success → COMPENSATED. N=1000 gives
+5 rounds → COMPENSATION_FAILED with exactly `UNREFUNDED_CHARGE`. F9 reservation RELEASED. **Result: matched.** Timelines:
+```
+F8 N=5:    11.477 INVENTORY_PENDING -> COMPENSATING on StockUnavailable, awaiting [RefundPayment]
+           13.785 COMPENSATING -> COMPENSATING on Timeout (attempt 2)
+           14.328 PaymentService refunded 10.00 (RETRY)
+           14.507 COMPENSATING -> COMPENSATED on PaymentRefunded
+F8 N=1000: 44.549 -> COMPENSATING … 46.653 / 48.679 / 50.703 / 52.739 Timeout (attempts 2-5)
+           54.764 COMPENSATING -> COMPENSATION_FAILED: compensations [RefundPayment] never confirmed. Order needs a human.
+F9:        16.207 COMPENSATING -> COMPENSATED on PaymentRefunded
+           16.930 InventoryService reserved 1 x SKU-EMPTY            (the late resend)
+           17.091 COMPENSATED -> COMPENSATED on StockReserved(late)
+           17.146 InventoryService released 1 x SKU-EMPTY (LATE_RESERVATION)
+$ make verify
+Tests run: 10 ReliableModeE2EIT | 9 NaiveModeE2EIT | 25 SagaStateMachineTest | ...
+BUILD SUCCESS   (94 tests)
+```
+**Tracing gap found:** the `dead-lettering …` log lines (6 in this run) carry **no sagaId/orderId**. The DLT recoverer runs in the
+error handler after the listener's MDC scope has closed. Fix in Phase 6 (set MDC from the record key + envelope inside the
+recoverer).
 
 ### Done in Phase 5a (timeouts)
 - **`SagaStateMachine.onTimeout`** (pure):
@@ -547,12 +589,10 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 5b:
-- **F8, failing refunds.** Add `payment.refund-fail-times` (deterministic: the first N refunds throw). With N = 5 the refund
-  outlasts Kafka's retries, goes to the DLT, is resent by the sweeper, and the saga still ends COMPENSATED. With N large the
-  saga ends COMPENSATION_FAILED / CANCELLED_NEEDS_ATTENTION, and `UNREFUNDED_CHARGE` is reported for a human. Naive mode
-  stays stuck in COMPENSATING.
-- **F9, late reservation.** An out-of-stock saga is COMPENSATED, stock is restocked, then a ReserveStock resend (new eventId)
-  arrives late. It reserves, and the orchestrator must release it, leaving no `ORPHAN_RESERVATION`.
-
-Then 5c: Jib images, `make up-all`, `make chaos-inventory`, `make demo`.
+Phase 5c:
+- Jib images for the three services into Podman (`jib:dockerBuild -Djib.dockerClient.executable=podman`, base from the mirror).
+  Jib runs on the host JDK, so the Zscaler certificate may be a problem here. To be checked.
+- `compose.yaml` profile `apps` with the three services (`DB_HOST=postgres`, `KAFKA_BOOTSTRAP=kafka:9092`, healthchecks,
+  `-Xmx256m`, mem limits). `make up-all`.
+- `make demo` (curl the `.http` scenarios and print outcomes) and `make chaos-inventory`: `podman kill` inventory mid-saga, show
+  INVENTORY_PENDING with attempts rising, `podman start`, show COMPLETED.

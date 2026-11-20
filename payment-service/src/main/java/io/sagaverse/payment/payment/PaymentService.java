@@ -133,6 +133,8 @@ public class PaymentService {
     Payment p = existing.get();
     switch (p.status()) {
       case "CHARGED" -> {
+        gateway.refund(
+            p.customerId(), p.amount()); // may throw: the transaction rolls back, Kafka retries
         insertLedger(sagaId, r.orderId(), p.customerId(), "REFUND", p.amount().negate(), now);
         jdbc.sql(
                 "UPDATE payment SET status = 'REFUNDED', reason = :reason, updated_at = :now"

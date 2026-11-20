@@ -2,6 +2,7 @@ package io.sagaverse.e2e;
 
 import static io.sagaverse.e2e.SagaverseCluster.Service.INVENTORY;
 import static io.sagaverse.e2e.SagaverseCluster.Service.ORDER;
+import static io.sagaverse.e2e.SagaverseCluster.Service.PAYMENT;
 import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -157,6 +158,65 @@ final class ScenarioRunner {
     cluster.start(INVENTORY);
     awaitSettled(sagaId);
     return outcome;
+  }
+
+  /**
+   * F8: the payment gateway fails the first {@code failures} refunds of an out-of-stock saga. A
+   * refund can't be declined, only delayed (ADR-0008). Afterwards payment-service is restarted
+   * healthy. Waits up to {@code settle} for the saga to finish.
+   */
+  UUID refundFailsTransiently(int failures, Duration settle) {
+    cluster.with(PAYMENT, "payment.refund-fail-times", failures).restart(PAYMENT);
+    try {
+      UUID sagaId = placeWithoutSettling("f8-", "SKU-EMPTY", 1, "10.00");
+      try {
+        await().atMost(settle).until(() -> TERMINAL.contains(state(sagaId)));
+      } catch (ConditionTimeoutException stillCompensating) {
+        // reported by InvariantChecker as STUCK_SAGA
+      }
+      return sagaId;
+    } finally {
+      cluster.with(PAYMENT, "payment.refund-fail-times", 0).restart(PAYMENT);
+    }
+  }
+
+  /**
+   * F9: an out-of-stock saga is cancelled (COMPENSATED). Then the SKU is restocked, and a resend of
+   * its ReserveStock (new eventId, like a sweeper resend still in flight) finally arrives. It
+   * succeeds now, and the orchestrator must give the stock back.
+   */
+  UUID lateReservationAfterCancellation() {
+    var inventory = cluster.db(INVENTORY);
+    UUID sagaId = placeAndSettle("f9-", "SKU-EMPTY", 1, "10.00");
+    inventory.update("UPDATE stock SET available = 5 WHERE sku = 'SKU-EMPTY'");
+    try {
+      String orderId = orderOf(sagaId);
+      var kafka = new KafkaTool(cluster.bootstrapServers());
+      var original = kafka.find(Topics.INVENTORY_COMMANDS, orderId, "ReserveStock");
+      kafka.send(Topics.INVENTORY_COMMANDS, orderId, KafkaTool.withNewEventId(original.value()));
+      // Reserve, then the orchestrator's ReleaseStock, end with the reservation RELEASED.
+      await()
+          .atMost(SETTLE)
+          .until(() ->
+              "RELEASED"
+                  .equals(
+                      inventory.query(
+                          "SELECT status FROM reservation WHERE saga_id = ?",
+                          rs -> rs.next() ? rs.getString(1) : null,
+                          sagaId)));
+    } catch (ConditionTimeoutException leftReserved) {
+      // reported by InvariantChecker as ORPHAN_RESERVATION
+    }
+    return sagaId;
+  }
+
+  /** Undo F9's restock so other scenarios still see SKU-EMPTY as empty. */
+  void emptySkuEmpty() {
+    cluster
+        .db(INVENTORY)
+        .update(
+            "UPDATE stock SET available = 0 WHERE sku = 'SKU-EMPTY' AND NOT EXISTS"
+                + " (SELECT 1 FROM reservation WHERE sku = 'SKU-EMPTY' AND status = 'RESERVED')");
   }
 
   // --- helpers ---------------------------------------------------------------------------

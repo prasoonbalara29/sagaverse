@@ -4,6 +4,9 @@ import static io.sagaverse.e2e.SagaverseCluster.Service.ORDER;
 import static io.sagaverse.e2e.SagaverseCluster.Service.PAYMENT;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.sagaverse.e2e.InvariantChecker.Kind;
+import io.sagaverse.e2e.InvariantChecker.Violation;
+import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -38,9 +41,10 @@ class ReliableModeE2EIT {
         new SagaverseCluster(POSTGRES, KAFKA, MODE)
             .with(ORDER, "saga.step-timeout", "2s")
             .with(ORDER, "saga.max-step-attempts", 3)
-            .with(ORDER, "saga.max-compensation-attempts", 20)
+            .with(ORDER, "saga.max-compensation-attempts", 5)
             .with(ORDER, "saga.sweep-interval", "500ms")
             .with(PAYMENT, "payment.decline-amount-over", "100.00")
+            .with(PAYMENT, "messaging.retry.initial-interval", "100ms")
             .startAll();
     scenarios = new ScenarioRunner(cluster);
     invariants = new InvariantChecker(cluster);
@@ -98,6 +102,36 @@ class ReliableModeE2EIT {
     assertThat(outage.stateWhileDown()).isEqualTo("COMPENSATING");
     assertThat(scenarios.state(outage.sagaId())).isEqualTo("COMPENSATED");
     assertThat(invariants.check(outage.sagaId())).isEmpty();
+  }
+
+  @Test
+  void f8_refundFailsForAWhile_isRetriedUntilItSucceeds() {
+    UUID sagaId = scenarios.refundFailsTransiently(5, Duration.ofSeconds(20));
+
+    assertThat(scenarios.state(sagaId)).isEqualTo("COMPENSATED");
+    assertThat(invariants.check(sagaId)).isEmpty();
+  }
+
+  @Test
+  void f8_refundNeverSucceeds_stopsAtCompensationFailed_andFlagsTheMoney() {
+    UUID sagaId = scenarios.refundFailsTransiently(1_000, Duration.ofSeconds(40));
+
+    assertThat(scenarios.state(sagaId)).isEqualTo("COMPENSATION_FAILED");
+    assertThat(invariants.check(sagaId))
+        .as("a human must refund this one")
+        .extracting(Violation::kind)
+        .containsExactly(Kind.UNREFUNDED_CHARGE);
+  }
+
+  @Test
+  void f9_lateReservationAfterCancellation_isReleased() {
+    try {
+      UUID sagaId = scenarios.lateReservationAfterCancellation();
+
+      assertThat(invariants.check(sagaId)).isEmpty();
+    } finally {
+      scenarios.emptySkuEmpty();
+    }
   }
 
   @Test

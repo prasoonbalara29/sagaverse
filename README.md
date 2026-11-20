@@ -5,7 +5,7 @@ A hands-on learning repo for the **saga pattern (orchestration)**. Three Spring 
 implementation corrupts data, then fixes it with a persisted saga, compensations, a transactional
 outbox, an inbox and a timeout sweeper. Every claim is backed by a test.
 
-> **Status:** Phase 5a (timeouts: stuck sagas are retried, then compensated). Containers and the chaos demo are next. See [PROGRESS.md](PROGRESS.md). Sections marked
+> **Status:** Phase 5b (all failure modes F1 to F9 covered by e2e tests in both modes). Containers and the chaos demo are next. See [PROGRESS.md](PROGRESS.md). Sections marked
 > _TBD_ get filled in as phases land.
 
 ## The problem
@@ -133,8 +133,8 @@ Every message uses the envelope `{eventId, sagaId, type, version, occurredAt, pa
 | F5 | Inventory down briefly mid-saga | ✅ completes once inventory is back (Kafka kept the command); no resends | ✅ completes; the sweeper resent ReserveStock meanwhile and stock was still reserved once |
 | F6 | Inventory down past the step budget | ❌ `STUCK_SAGA`: order PENDING and customer charged for as long as the outage lasts | ✅ gives up after 3 attempts, refunds at once, releases stock when inventory returns → COMPENSATED |
 | F7 | Poison message | ✅ sent straight to `<topic>.DLT` with the cause in its headers; later orders unaffected (`PoisonMessageE2EIT`). A poisoned *command* still leaves its saga waiting until the Phase 5 sweeper. | _TBD (Phase 5)_ |
-| F8 | Compensation fails transiently | _TBD_ | _TBD_ |
-| F9 | Late reply after cancellation | _TBD_ | _TBD_ |
+| F8 | Refund fails (first 5 attempts / forever) | ❌ refund lands in the DLT, saga stuck COMPENSATING, money taken (`STUCK_SAGA`) | ✅ sweeper resends → COMPENSATED. If it never succeeds: COMPENSATION_FAILED + order CANCELLED_NEEDS_ATTENTION, flagged `UNREFUNDED_CHARGE` for a human |
+| F9 | Late reservation after cancellation | ✅ released (the rule lives in the shared state machine) | ✅ released: `COMPENSATED -> COMPENSATED on StockReserved(late)`, then ReleaseStock |
 
 ## How to run
 

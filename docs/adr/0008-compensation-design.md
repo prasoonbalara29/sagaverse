@@ -28,7 +28,8 @@ that went to the DLT and is **replayed** later, or a resend that was still in fl
 per cancelled saga. (Migrations `V2__*_tombstone.sql` relax NOT NULL on the columns a tombstone can't fill.)
 
 **Compensations are retryable, never declinable.** A refund of a real charge has to succeed
-eventually, so the fake gateway can fail a refund only transiently (`payment.refund-fail-rate`).
+eventually, so the fake gateway can fail a refund only transiently (`payment.refund-fail-times`:
+the first N refunds throw a retryable `GatewayUnavailableException`).
 
 **What we compensate:**
 - `StockUnavailable` → RefundPayment.

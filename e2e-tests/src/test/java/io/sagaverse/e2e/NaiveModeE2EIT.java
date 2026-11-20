@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import io.sagaverse.e2e.InvariantChecker.Kind;
 import io.sagaverse.e2e.InvariantChecker.Violation;
+import java.time.Duration;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -40,9 +41,10 @@ class NaiveModeE2EIT {
         new SagaverseCluster(POSTGRES, KAFKA, MODE)
             .with(ORDER, "saga.step-timeout", "2s")
             .with(ORDER, "saga.max-step-attempts", 3)
-            .with(ORDER, "saga.max-compensation-attempts", 20)
+            .with(ORDER, "saga.max-compensation-attempts", 5)
             .with(ORDER, "saga.sweep-interval", "500ms")
             .with(PAYMENT, "payment.decline-amount-over", "100.00")
+            .with(PAYMENT, "messaging.retry.initial-interval", "100ms")
             .startAll();
     scenarios = new ScenarioRunner(cluster);
     invariants = new InvariantChecker(cluster);
@@ -114,6 +116,35 @@ class NaiveModeE2EIT {
     assertThat(outage.violationsWhileDown())
         .extracting(Violation::kind)
         .containsExactly(Kind.STUCK_SAGA);
+  }
+
+  /**
+   * F8: the refund outlasts Kafka's retries and lands in the DLT. Nothing resends it, so the saga
+   * sits in COMPENSATING with the customer's money taken.
+   */
+  @Test
+  void f8_refundFailsForAWhile_isNeverRetried_moneyStaysTaken() {
+    UUID sagaId = scenarios.refundFailsTransiently(5, Duration.ofSeconds(10));
+
+    assertThat(scenarios.state(sagaId)).isEqualTo("COMPENSATING");
+    assertThat(invariants.check(sagaId))
+        .extracting(Violation::kind)
+        .containsExactly(Kind.STUCK_SAGA);
+  }
+
+  /**
+   * F9 is handled in naive mode too: the late-reservation rule lives in the state machine, which
+   * both modes share.
+   */
+  @Test
+  void f9_lateReservationAfterCancellation_isReleasedEvenInNaiveMode() {
+    try {
+      UUID sagaId = scenarios.lateReservationAfterCancellation();
+
+      assertThat(invariants.check(sagaId)).isEmpty();
+    } finally {
+      scenarios.emptySkuEmpty();
+    }
   }
 
   @Test

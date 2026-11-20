@@ -26,12 +26,12 @@ On each sweep (ADR-0003), for every stuck saga:
 
 Defaults (`@ConfigurationProperties("saga")`):
 
-| Property | Default | Test profile |
+| Property | Default | e2e tests (`*ModeE2EIT`) |
 |---|---|---|
-| `step-timeout` | 10s | 500ms |
+| `step-timeout` | 10s | 2s |
 | `max-step-attempts` | 6 (about 60s total, enough to restart a container in the chaos demo) | 3 |
-| `max-compensation-attempts` | 10 | 3 |
-| `sweep-interval` | 2s | 100ms |
+| `max-compensation-attempts` | 10 | 5 |
+| `sweep-interval` | 2s | 500ms |
 
 Re-sending is safe because commands are idempotent by sagaId (ADR-0005).
 

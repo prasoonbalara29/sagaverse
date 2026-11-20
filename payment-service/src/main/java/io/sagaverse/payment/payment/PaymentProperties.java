@@ -9,10 +9,14 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *
  * @param declineAmountOver charges above this amount are declined (deterministic, used by tests)
  * @param failRate probability in [0, 1] that the gateway declines any charge (for demos)
+ * @param refundFailTimes the first N refunds fail with a transient error (F8). Refunds are never
+ *     declined, only delayed (ADR-0008).
  */
 @ConfigurationProperties("payment")
 public record PaymentProperties(
-    @DefaultValue("1000.00") BigDecimal declineAmountOver, @DefaultValue("0.0") double failRate) {
+    @DefaultValue("1000.00") BigDecimal declineAmountOver,
+    @DefaultValue("0.0") double failRate,
+    @DefaultValue("0") int refundFailTimes) {
 
   public PaymentProperties {
     if (failRate < 0 || failRate > 1) {

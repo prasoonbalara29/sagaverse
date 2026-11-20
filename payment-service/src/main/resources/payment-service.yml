@@ -40,6 +40,8 @@ spring:
 payment:
   decline-amount-over: 1000.00
   fail-rate: 0.0
+  # F8 demo: the first N refunds fail transiently (Kafka retries, DLT, then the orchestrator resends).
+  refund-fail-times: 0
 
 # naive: dual write, no dedup. reliable (Phase 4): outbox + inbox (ADR-0010).
 saga:
