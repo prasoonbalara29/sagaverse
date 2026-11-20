@@ -45,6 +45,14 @@ payment:
 saga:
   mode: naive
 
+# Retry + dead-letter policy (KafkaErrorHandling, ADR-0007): blocking retries after 1s, 2s, 4s,
+# then <topic>.DLT. Malformed / unknown-type / unsupported-version messages skip the retries.
+messaging:
+  retry:
+    initial-interval: 1s
+    multiplier: 2.0
+    max-retries: 3
+
 management:
   endpoints:
     web:

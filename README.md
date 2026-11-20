@@ -132,7 +132,7 @@ Every message uses the envelope `{eventId, sagaId, type, version, occurredAt, pa
 | F4 | Lost event after crash (dual write) | _TBD_ | _TBD_ |
 | F5 | Consumer crash mid-saga | _TBD_ | _TBD_ |
 | F6 | Service down past deadline | _TBD_ | _TBD_ |
-| F7 | Poison message | _TBD_ | _TBD_ |
+| F7 | Poison message | ✅ sent straight to `<topic>.DLT` with the cause in its headers; later orders unaffected (`PoisonMessageE2EIT`). A poisoned *command* still leaves its saga waiting until the Phase 5 sweeper. | _TBD (Phase 5)_ |
 | F8 | Compensation fails transiently | _TBD_ | _TBD_ |
 | F9 | Late reply after cancellation | _TBD_ | _TBD_ |
 

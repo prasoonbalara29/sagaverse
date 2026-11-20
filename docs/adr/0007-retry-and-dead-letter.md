@@ -15,14 +15,17 @@ pill".
 
 - **Deserialization:** `ErrorHandlingDeserializer` wraps the JSON deserializer, so a bad record
   reaches the error handler instead of crashing the consumer loop.
-- **Retries:** Spring Kafka `DefaultErrorHandler` with **blocking** `ExponentialBackOff`: 3 attempts,
-  at 1s, then 2s, then 4s. Blocking means the partition waits, which keeps per-order ordering intact
-  (ADR-0002).
-- **Non-retryable** exceptions skip the backoff and go straight to the DLT:
-  `DeserializationException`, `UnknownMessageTypeException`, `UnsupportedVersionException`, and
-  validation failures.
+- **Retries:** Spring Kafka `DefaultErrorHandler` with **blocking** `ExponentialBackOffWithMaxRetries`:
+  the first attempt plus 3 retries after 1s, 2s and 4s (`messaging.retry.*`, see `KafkaErrorHandling` in
+  each service). Blocking means the partition waits, which keeps per-order ordering intact (ADR-0002).
+- **Non-retryable** exceptions skip the backoff and go straight to the DLT. These are the
+  `EnvelopeCodec.MessageRejectedException` subtypes: `MalformedMessageException` (bad JSON, missing
+  envelope field, payload failing validation), `UnknownMessageTypeException` (including a message from the
+  wrong family on a topic), and `UnsupportedVersionException`. Values are plain strings, so a bad record
+  surfaces in the codec, not in the Kafka deserializer, and `ErrorHandlingDeserializer` isn't needed.
 - **Dead letter:** `DeadLetterPublishingRecoverer` sends the record to `<topic>.DLT` (3 partitions,
-  same key). Headers carry the original topic, partition, offset and the exception. The offset is
+  same key, same partition). Headers carry the original topic, partition and offset, and the exception
+  (`kafka_dlt-exception-fqcn`, `kafka_dlt-exception-cause-fqcn`, `kafka_dlt-exception-message`). The offset is
   then committed, so the partition moves on.
 - **Business recovery:** a command in the DLT never gets a reply. The saga's step deadline expires,
   and the sweeper re-sends the command or compensates (ADR-0009, ADR-0008). The business flow stays
@@ -32,7 +35,10 @@ pill".
 
 ## Consequences
 
-- A poison message costs at most about 7s of partition stall before it's moved aside.
+- A poison message costs no stall: it isn't retried. A *transient* failure costs at most about 7s
+  (1 + 2 + 4) of partition stall before it's moved aside.
+- Without this handler, Spring Kafka's default retries 10 times with no delay, then logs and **skips**
+  the record. Nothing is kept for inspection. `PoisonMessageE2EIT` showed exactly that before the fix.
 - Transient failures that last longer than the backoff end up in the DLT too. The saga's own
   re-send logic then gives them another chance with a fresh message.
 

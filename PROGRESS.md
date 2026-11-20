@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 3b (orchestrator failure transitions) — done. Next: 3c (retry + DLT)
+## Current phase: 3 (failures and compensations) — done. Next: 4 (outbox, inbox, idempotency)
 
 ### Phase checklist
 
@@ -16,12 +16,48 @@
 | 2d | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ✅ done |
 | 3a | Payment decline rule + RefundPayment, inventory ReleaseStock, tombstones | ✅ done |
 | 3b | F1/F2 e2e red first, then orchestrator FAILED / COMPENSATING / COMPENSATED | ✅ done |
-| 3c | Retry + DLT wiring, poison-message test (F7) | ⏳ next |
-| 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
+| 3c | Retry + DLT wiring, poison-message test (F7) | ✅ done |
+| 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | ⏳ next |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 3c (retry + dead-letter, F7)
+**Step 1: prove the problem.** `PoisonMessageE2EIT` sends garbage to all 3 partitions of `payment.commands`, an unknown
+type (`ShipOrder`) to `inventory.commands` and a version-2 envelope to `payment.replies`. It expects each one on its
+`.DLT`. Prediction: today the default handler retries 10× with no delay, logs, and skips, so the DLTs stay empty.
+Real output:
+```
+[records with key poison-c15faf80… on payment.commands.DLT]   Expected size: 3 but was: 0
+[records with key poison-f819844a… on inventory.commands.DLT] Expected size: 1 but was: 0
+[records with key poison-6daa1c4d… on payment.replies.DLT]    Expected size: 1 but was: 0
+[ERROR] Tests run: 3, Failures: 0, Errors: 3
+logged by the default handler:
+"Backoff FixedBackOff{interval=0, currentAttempts=10, maxAttempts=9} exhausted for payment.commands-0@0"  (and -1, -2, inventory, replies)
+```
+**Step 2: fix.** `KafkaErrorHandling` in each service (a deliberate per-service copy): a `DefaultErrorHandler` bean with
+blocking `ExponentialBackOffWithMaxRetries` (1s, 2s, 4s from `messaging.retry.*`), `MessageRejectedException` marked
+not-retryable, and a `DeadLetterPublishingRecoverer` to `<topic>.DLT` (same partition) that logs `dead-lettering …`.
+
+**Step 3: same test green.** Prediction: 3 malformed records on `payment.commands.DLT` with cause `MalformedMessageException`,
+and a later order on those partitions still CONFIRMED. `ShipOrder` gives `UnknownMessageTypeException`, version 2 gives
+`UnsupportedVersionException`. **Result: matched.**
+```
+dead-lettering payment.commands-0@0: …EnvelopeCodec$MalformedMessageException: not a valid envelope: Unrecognized token 'not' …
+dead-lettering payment.commands-1@0: … (same)
+dead-lettering payment.commands-2@0: … (same)
+dead-lettering inventory.commands-2@0: …EnvelopeCodec$UnknownMessageTypeException: unknown message type: ShipOrder
+dead-lettering payment.replies-2@0: …EnvelopeCodec$UnsupportedVersionException: unsupported version 2 of PaymentDeclined
+$ make verify
+Tests run: 3 PoisonMessageE2EIT | 2 FailurePathsE2EIT | 1 HappyPathE2EIT | ...
+BUILD SUCCESS   (69 tests)
+```
+ADR-0007 now says "first attempt + 3 retries" (it said "3 attempts"), lists the real exception types and header names, and
+records what the default handler does without this config.
+
+**Known gap (by design, until Phase 5):** a poisoned or dead-lettered *command* means its saga never gets a reply. In naive mode
+nothing notices. The Phase 5 sweeper turns that into a timeout and compensation (F6/F7 reliable column).
 
 ### Done in Phase 3b (orchestrator failure transitions)
 **Step 1: prove the problem.** I wrote `FailurePathsE2EIT` (F1, F2) and ran it against the Phase 3a orchestrator, which ignored
@@ -373,8 +409,8 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 3c: retry + dead-letter (ADR-0007) in all three services. `DefaultErrorHandler` with blocking exponential backoff,
-with `MessageRejectedException` (malformed, unknown type, unsupported version) non-retryable, and a
-`DeadLetterPublishingRecoverer` to `<topic>.DLT`. Prove first: a poison message on `payment.commands` today is retried
-10 times and then silently skipped (logged only). After: it lands on `payment.commands.DLT` with exception headers,
-and later messages on the partition still flow.
+Phase 4: reliability. Build the `InvariantChecker` (ADR-0010) and write F3 (duplicate delivery) and F4 (lost event after
+a crash between commit and send) e2e tests. Run them in naive mode and paste the red output: expect 2 CHARGE ledger rows /
+a doubled reservation for F3, and an order stuck PENDING with no ChargePayment for F4. Then add the outbox + relay, the inbox
+and sagaId business idempotency behind `saga.mode=reliable`, show the same scenarios green in reliable mode, and keep
+`NaiveModeE2EIT` asserting the violations. Probably split 4a (outbox, F4) / 4b (inbox, F3).
