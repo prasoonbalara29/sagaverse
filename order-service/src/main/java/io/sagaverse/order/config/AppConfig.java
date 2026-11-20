@@ -1,6 +1,6 @@
 package io.sagaverse.order.config;
 
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import io.sagaverse.order.saga.SagaProperties;
 import java.time.Clock;
 import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
@@ -26,6 +26,7 @@ public class AppConfig {
   @Bean
   Jackson2ObjectMapperBuilderCustomizer exactDecimalNodes() {
     return builder ->
-        builder.postConfigurer(m -> m.setNodeFactory(JsonNodeFactory.withExactBigDecimals(true)));
+        builder.postConfigurer(
+            m -> m.configure(JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES, false));
   }
 }

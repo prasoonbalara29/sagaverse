@@ -14,12 +14,18 @@ and a compensation itself can fail.
 
 | Forward step | Compensation | Idempotent and order-safe because |
 |---|---|---|
-| ChargePayment | RefundPayment | Looks up `payment` by sagaId. CHARGED → refund, write a negative `ledger` entry, mark REFUNDED. Already REFUNDED, DECLINED or missing → reply `PaymentRefunded` (paymentId null when nothing was charged) without moving money. |
+| ChargePayment | RefundPayment | Looks up `payment` by sagaId (row lock). CHARGED → refund, write a negative `ledger` entry, mark REFUNDED. Already REFUNDED or DECLINED → reply `PaymentRefunded` without moving money. Missing → insert a **REFUNDED tombstone** (no amount) and reply `PaymentRefunded(paymentId=null)`. |
 | ReserveStock | ReleaseStock | Looks up `reservation` by sagaId. RESERVED → add the quantity back, mark RELEASED. Missing → insert a **RELEASED tombstone**. Already RELEASED → no-op. |
 
 **Tombstone:** if a late `ReserveStock` arrives after `ReleaseStock` for the same saga, it finds the
 RELEASED row and replies `StockUnavailable(reason=SAGA_CANCELLED)` without touching stock. The same
-idea protects payment: `ChargePayment` on a REFUNDED row is ignored.
+idea protects payment: a `ChargePayment` that finds a REFUNDED row (a tombstone or a real refund) replies
+`PaymentDeclined(reason=SAGA_CANCELLED)` without charging.
+
+When can a compensation overtake its forward step? Normally it can't. Both travel on the same topic with
+the same key (ADR-0002), so Kafka delivers the step first. Tombstones cover the exceptions: a forward step
+that went to the DLT and is **replayed** later, or a resend that was still in flight. The cost is one row
+per cancelled saga. (Migrations `V2__*_tombstone.sql` relax NOT NULL on the columns a tombstone can't fill.)
 
 **Compensations are retryable, never declinable.** A refund of a real charge has to succeed
 eventually, so the fake gateway can fail a refund only transiently (`payment.refund-fail-rate`).

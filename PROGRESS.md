@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 2 (happy path) — done. Next: 3 (failures and compensations)
+## Current phase: 3a (compensation handlers) — done. Next: 3b (orchestrator failure transitions)
 
 ### Phase checklist
 
@@ -14,12 +14,42 @@
 | 2b | Payment + inventory command handlers (naive), per-service command ITs | ✅ done |
 | 2c | Per-service config name + migration folder, so all three jars can share one classpath | ✅ done |
 | 2d | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ✅ done |
-| 3 | Declines and compensations (F1, F2, F7 naive) | ⏳ next |
+| 3a | Payment decline rule + RefundPayment, inventory ReleaseStock, tombstones | ✅ done |
+| 3b | F1/F2 e2e red first, then orchestrator FAILED / COMPENSATING / COMPENSATED | ⏳ next |
+| 3c | Retry + DLT wiring, poison-message test (F7) | pending |
 | 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 3a (payment + inventory compensation handlers)
+- **Fake gateway** (`FakeGateway` + `PaymentProperties`): `payment.decline-amount-over` (default 1000.00, deterministic)
+  and `payment.fail-rate` (random, for demos). A decline writes `payment.status = DECLINED` + reason, no ledger row,
+  and replies `PaymentDeclined`.
+- **RefundPayment** (idempotent in every mode): row lock on `payment`. CHARGED gives a `REFUND -amount` ledger row,
+  status REFUNDED, and `PaymentRefunded(paymentId)`. Already refunded or declined: reply without moving money.
+  No row: write a REFUNDED tombstone and reply `PaymentRefunded(null)`. A later `ChargePayment` hitting a REFUNDED row
+  gives `PaymentDeclined(SAGA_CANCELLED)`.
+- **ReleaseStock** (idempotent in every mode): row lock on `reservation`. RESERVED gives stock back, status RELEASED,
+  and `StockReleased(true)`. Already RELEASED gives `StockReleased(false)`. No row writes a RELEASED tombstone
+  (`sku` NULL, qty 0). A later `ReserveStock` hitting a RELEASED row gives `StockUnavailable(SAGA_CANCELLED)`.
+- Migrations: `payment/V2__refund_tombstone.sql` (amount, customer_id nullable) and
+  `inventory/V2__release_tombstone.sql` (sku nullable).
+- ADR-0008 updated: the payment tombstone, and why a compensation can only overtake its step through DLT replay or an in-flight resend.
+- **Deprecation fix**: `JsonNodeFactory.withExactBigDecimals` is deprecated in Jackson 2.21. All three `AppConfig`s and both
+  mapper tests now disable `JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES` instead. The 42.50 round-trip tests still pass.
+- New ITs: payment +3 (declined, refund-twice-refunds-once, refund-before-charge tombstone), inventory +2
+  (release-twice-releases-once, release-before-reserve tombstone).
+
+Predicted, then run (3a): decline gives `AMOUNT_LIMIT_EXCEEDED`, DECLINED, 0 ledger rows. Two refunds give
+ledger `[CHARGE 10.00, REFUND -10.00]`. Tombstone then charge gives `SAGA_CANCELLED`, 0 ledger rows. Reserve 4 then release
+twice gives `[true, false]`, stock restored. Tombstone then reserve gives `SAGA_CANCELLED`, stock unchanged. **Result: matched.**
+```
+$ make verify
+Tests run: 4 PaymentCommandsIT | 4 InventoryCommandsIT | ... | 1 HappyPathE2EIT
+BUILD SUCCESS   (59 tests, no deprecation warnings)
+```
 
 ### Done in Phase 2d (e2e module)
 - `e2e-tests` module (tests only). It depends on the three services' plain jars.
@@ -295,7 +325,6 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 3: failures and compensations. First write F1 (payment declined) and F2 (out of stock → refund) as e2e tests and
-show them failing on today's code. Today the saga just sits in PAYMENT_PENDING / INVENTORY_PENDING, because the state
-machine ignores those replies. Then add the fake gateway's decline rule, RefundPayment / ReleaseStock (with the RELEASED
-tombstone), the orchestrator transitions to FAILED / COMPENSATING / COMPENSATED, and DLT wiring for poison messages (F7).
+Phase 3b: write F1 (payment declined) and F2 (out of stock → refund) as e2e tests and run them on today's orchestrator,
+which ignores PaymentDeclined / StockUnavailable. Expect red: F1 stuck in PAYMENT_PENDING, F2 stuck in INVENTORY_PENDING
+**with the customer charged**. Then add the FAILED / COMPENSATING / COMPENSATED transitions and show the same tests green.

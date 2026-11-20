@@ -9,7 +9,7 @@ import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.sagaverse.events.InventoryMessages.InventoryCommand;
 import io.sagaverse.events.InventoryMessages.InventoryReply;
@@ -50,7 +50,7 @@ class EnvelopeTest {
           .registerModule(new JavaTimeModule())
           .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
           .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
-          .setNodeFactory(JsonNodeFactory.withExactBigDecimals(true));
+          .configure(JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES, false);
 
   /** One valid sample per type. The switch is exhaustive, so a new type forces a new sample. */
   private static SagaPayload sample(EventType type) {

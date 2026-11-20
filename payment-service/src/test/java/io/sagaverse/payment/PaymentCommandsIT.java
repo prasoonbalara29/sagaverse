@@ -7,6 +7,9 @@ import static org.awaitility.Awaitility.await;
 import io.sagaverse.events.EventEnvelope;
 import io.sagaverse.events.PaymentMessages.ChargePayment;
 import io.sagaverse.events.PaymentMessages.PaymentCharged;
+import io.sagaverse.events.PaymentMessages.PaymentDeclined;
+import io.sagaverse.events.PaymentMessages.PaymentRefunded;
+import io.sagaverse.events.PaymentMessages.RefundPayment;
 import io.sagaverse.events.SagaPayload;
 import io.sagaverse.events.Topics;
 import io.sagaverse.payment.messaging.EnvelopeCodec;
@@ -43,7 +46,8 @@ import org.testcontainers.kafka.KafkaContainer;
  * payment-service handles ChargePayment end to end. The test plays the orchestrator: it sends
  * commands over real Kafka and reads the replies.
  */
-@SpringBootTest(properties = PaymentServiceApplication.CONFIG_NAME)
+@SpringBootTest(
+    properties = {PaymentServiceApplication.CONFIG_NAME, "payment.decline-amount-over=100.00"})
 @Testcontainers
 class PaymentCommandsIT {
 
@@ -93,7 +97,7 @@ class PaymentCommandsIT {
 
     send(sagaId, new ChargePayment(orderId, "cust-1", new BigDecimal("42.50")));
 
-    var reply = awaitReply(orderId);
+    var reply = awaitReply(orderId, "PaymentCharged");
     assertThat(reply.sagaId()).isEqualTo(sagaId);
     assertThat(reply.payload()).isInstanceOf(PaymentCharged.class);
     var charged = (PaymentCharged) reply.payload();
@@ -109,6 +113,75 @@ class PaymentCommandsIT {
         .containsExactly(Map.of("entry_type", "CHARGE", "amount", new BigDecimal("42.50")));
   }
 
+  @Test
+  void chargeOverTheLimit_isDeclined_andNoMoneyMoves() {
+    UUID sagaId = UUID.randomUUID();
+    String orderId = "order-" + UUID.randomUUID();
+
+    send(sagaId, new ChargePayment(orderId, "cust-1", new BigDecimal("500.00")));
+
+    assertThat(awaitReply(orderId, "PaymentDeclined").payload())
+        .isEqualTo(new PaymentDeclined(orderId, "AMOUNT_LIMIT_EXCEEDED"));
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT status FROM payment WHERE saga_id = ?", String.class, sagaId))
+        .isEqualTo("DECLINED");
+    assertThat(ledgerRows(sagaId)).isZero();
+  }
+
+  @Test
+  void refundAfterCharge_refundsOnce_evenIfDeliveredTwice() {
+    UUID sagaId = UUID.randomUUID();
+    String orderId = "order-" + UUID.randomUUID();
+    send(sagaId, new ChargePayment(orderId, "cust-1", new BigDecimal("10.00")));
+    var charged = (PaymentCharged) awaitReply(orderId, "PaymentCharged").payload();
+
+    send(sagaId, new RefundPayment(orderId, "OUT_OF_STOCK"));
+    send(sagaId, new RefundPayment(orderId, "OUT_OF_STOCK"));
+
+    await().atMost(20, SECONDS).pollInSameThread().until(() -> refundReplies(orderId) == 2);
+    assertThat(awaitReply(orderId, "PaymentRefunded").payload())
+        .isEqualTo(new PaymentRefunded(orderId, charged.paymentId()));
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT status FROM payment WHERE saga_id = ?", String.class, sagaId))
+        .isEqualTo("REFUNDED");
+    assertThat(
+            jdbc.queryForList(
+                "SELECT entry_type, amount FROM ledger WHERE saga_id = ? ORDER BY id", sagaId))
+        .containsExactly(
+            Map.of("entry_type", "CHARGE", "amount", new BigDecimal("10.00")),
+            Map.of("entry_type", "REFUND", "amount", new BigDecimal("-10.00")));
+  }
+
+  @Test
+  void refundBeforeAnyCharge_writesTombstone_soALateChargeIsDeclined() {
+    UUID sagaId = UUID.randomUUID();
+    String orderId = "order-" + UUID.randomUUID();
+
+    send(sagaId, new RefundPayment(orderId, "TIMEOUT"));
+    assertThat(awaitReply(orderId, "PaymentRefunded").payload())
+        .isEqualTo(new PaymentRefunded(orderId, null));
+
+    send(sagaId, new ChargePayment(orderId, "cust-1", new BigDecimal("10.00")));
+    assertThat(awaitReply(orderId, "PaymentDeclined").payload())
+        .isEqualTo(new PaymentDeclined(orderId, "SAGA_CANCELLED"));
+    assertThat(ledgerRows(sagaId)).isZero();
+  }
+
+  private int ledgerRows(UUID sagaId) {
+    return jdbc.queryForObject(
+        "SELECT count(*) FROM ledger WHERE saga_id = ?", Integer.class, sagaId);
+  }
+
+  private long refundReplies(String orderId) {
+    replies.poll(Duration.ofMillis(200)).forEach(seen::add);
+    return seen.stream()
+        .filter(r -> orderId.equals(r.key()))
+        .filter(r -> codec.decode(r.value()).type().equals("PaymentRefunded"))
+        .count();
+  }
+
   // --- helpers ---------------------------------------------------------------------------
 
   private void send(UUID sagaId, SagaPayload command) {
@@ -116,7 +189,7 @@ class PaymentCommandsIT {
     kafka.send(Topics.PAYMENT_COMMANDS, command.orderId(), codec.encode(envelope)).join();
   }
 
-  private EventEnvelope<SagaPayload> awaitReply(String orderId) {
+  private EventEnvelope<SagaPayload> awaitReply(String orderId, String type) {
     return await()
         .atMost(Duration.ofSeconds(20))
         .pollInSameThread()
@@ -126,6 +199,7 @@ class PaymentCommandsIT {
               return seen.stream()
                   .filter(r -> orderId.equals(r.key()))
                   .map(r -> codec.decode(r.value()))
+                  .filter(e -> e.type().equals(type))
                   .findFirst();
             },
             Optional::isPresent)

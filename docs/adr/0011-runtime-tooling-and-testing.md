@@ -17,7 +17,7 @@ Nothing selects a JDK by version number alone.
 Jackson. The `events` module holds the records and constants only. No Schema Registry and no Avro.
 Each consumer rejects an unknown `type` or unsupported `version` (they go to the DLT, ADR-0007).
 Every service's `ObjectMapper` **must** enable `USE_BIG_DECIMAL_FOR_FLOATS` and
-`JsonNodeFactory.withExactBigDecimals(true)`. Consumers read the payload as a `JsonNode` before
+`JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES` disabled (the non-deprecated form of exact BigDecimal nodes). Consumers read the payload as a `JsonNode` before
 converting it, and Jackson's default would turn `42.50` into the double `42.5` and lose precision
 on money. `EnvelopeTest` caught this in Phase 1a.
 

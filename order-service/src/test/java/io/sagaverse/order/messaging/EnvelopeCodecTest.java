@@ -6,7 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.cfg.JsonNodeFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.sagaverse.events.EventEnvelope;
 import io.sagaverse.events.PaymentMessages.PaymentCharged;
@@ -27,7 +27,7 @@ class EnvelopeCodecTest {
               .registerModule(new JavaTimeModule())
               .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
               .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
-              .setNodeFactory(JsonNodeFactory.withExactBigDecimals(true)));
+              .configure(JsonNodeFeature.STRIP_TRAILING_BIGDECIMAL_ZEROES, false));
 
   private static final String VALID_PAYLOAD =
       "{\"orderId\":\"o-1\",\"paymentId\":\"" + UUID.randomUUID() + "\",\"amount\":42.50}";

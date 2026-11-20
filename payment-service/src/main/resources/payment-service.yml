@@ -35,6 +35,12 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 
+# Fake gateway (PaymentProperties): charges above decline-amount-over are declined; fail-rate
+# declines a random fraction of charges.
+payment:
+  decline-amount-over: 1000.00
+  fail-rate: 0.0
+
 # naive: dual write, no dedup. reliable (Phase 4): outbox + inbox (ADR-0010).
 saga:
   mode: naive

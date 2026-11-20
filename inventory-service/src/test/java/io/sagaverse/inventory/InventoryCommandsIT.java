@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import io.sagaverse.events.EventEnvelope;
+import io.sagaverse.events.InventoryMessages.ReleaseStock;
 import io.sagaverse.events.InventoryMessages.ReserveStock;
+import io.sagaverse.events.InventoryMessages.StockReleased;
 import io.sagaverse.events.InventoryMessages.StockReserved;
 import io.sagaverse.events.InventoryMessages.StockUnavailable;
 import io.sagaverse.events.SagaPayload;
@@ -93,7 +95,7 @@ class InventoryCommandsIT {
 
     send(sagaId, new ReserveStock(orderId, "SKU-1", 2));
 
-    var reply = awaitReply(orderId);
+    var reply = awaitReply(orderId, "StockReserved");
     assertThat(reply.sagaId()).isEqualTo(sagaId);
     assertThat(reply.payload()).isEqualTo(new StockReserved(orderId, "SKU-1", 2));
     assertThat(available("SKU-1")).isEqualTo(98);
@@ -112,7 +114,7 @@ class InventoryCommandsIT {
 
     send(sagaId, new ReserveStock(orderId, "SKU-EMPTY", 1));
 
-    var reply = awaitReply(orderId);
+    var reply = awaitReply(orderId, "StockUnavailable");
     assertThat(reply.payload())
         .isEqualTo(new StockUnavailable(orderId, "SKU-EMPTY", StockUnavailable.OUT_OF_STOCK));
     assertThat(available("SKU-EMPTY")).isZero();
@@ -120,6 +122,54 @@ class InventoryCommandsIT {
             jdbc.queryForObject(
                 "SELECT count(*) FROM reservation WHERE saga_id = ?", Integer.class, sagaId))
         .isZero();
+  }
+
+  @Test
+  void releaseAfterReserve_restoresStockOnce_evenIfDeliveredTwice() {
+    UUID sagaId = UUID.randomUUID();
+    String orderId = "order-" + UUID.randomUUID();
+    int before = available("SKU-2");
+    send(sagaId, new ReserveStock(orderId, "SKU-2", 4));
+    awaitReply(orderId, "StockReserved");
+    assertThat(available("SKU-2")).isEqualTo(before - 4);
+
+    send(sagaId, new ReleaseStock(orderId, "TIMEOUT"));
+    send(sagaId, new ReleaseStock(orderId, "TIMEOUT"));
+
+    await().atMost(20, SECONDS).pollInSameThread().until(() -> releaseReplies(orderId).size() == 2);
+    assertThat(releaseReplies(orderId))
+        .containsExactly(new StockReleased(orderId, true), new StockReleased(orderId, false));
+    assertThat(available("SKU-2")).isEqualTo(before);
+    assertThat(
+            jdbc.queryForObject(
+                "SELECT status FROM reservation WHERE saga_id = ?", String.class, sagaId))
+        .isEqualTo("RELEASED");
+  }
+
+  @Test
+  void releaseBeforeReserve_writesTombstone_soALateReserveIsRefused() {
+    UUID sagaId = UUID.randomUUID();
+    String orderId = "order-" + UUID.randomUUID();
+    int before = available("SKU-2");
+
+    send(sagaId, new ReleaseStock(orderId, "TIMEOUT"));
+    assertThat(awaitReply(orderId, "StockReleased").payload())
+        .isEqualTo(new StockReleased(orderId, false));
+
+    send(sagaId, new ReserveStock(orderId, "SKU-2", 1));
+    assertThat(awaitReply(orderId, "StockUnavailable").payload())
+        .isEqualTo(new StockUnavailable(orderId, "SKU-2", StockUnavailable.SAGA_CANCELLED));
+    assertThat(available("SKU-2")).isEqualTo(before);
+  }
+
+  private List<SagaPayload> releaseReplies(String orderId) {
+    replies.poll(Duration.ofMillis(200)).forEach(seen::add);
+    return seen.stream()
+        .filter(r -> orderId.equals(r.key()))
+        .map(r -> codec.decode(r.value()))
+        .filter(e -> e.type().equals("StockReleased"))
+        .map(EventEnvelope::payload)
+        .toList();
   }
 
   private int available(String sku) {
@@ -133,7 +183,7 @@ class InventoryCommandsIT {
     kafka.send(Topics.INVENTORY_COMMANDS, command.orderId(), codec.encode(envelope)).join();
   }
 
-  private EventEnvelope<SagaPayload> awaitReply(String orderId) {
+  private EventEnvelope<SagaPayload> awaitReply(String orderId, String type) {
     return await()
         .atMost(Duration.ofSeconds(20))
         .pollInSameThread()
@@ -143,6 +193,7 @@ class InventoryCommandsIT {
               return seen.stream()
                   .filter(r -> orderId.equals(r.key()))
                   .map(r -> codec.decode(r.value()))
+                  .filter(e -> e.type().equals(type))
                   .findFirst();
             },
             Optional::isPresent)
