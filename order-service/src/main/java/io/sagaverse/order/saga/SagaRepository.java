@@ -67,6 +67,26 @@ public class SagaRepository {
   }
 
   /**
+   * Stuck sagas: not terminal, and the current step's deadline has passed (ADR-0009). Locks the
+   * rows until the caller's transaction ends, and skips rows someone else is holding.
+   */
+  public List<SagaInstance> lockDue(Instant now, int limit) {
+    return jdbc.sql(
+            """
+            SELECT * FROM saga_instance
+             WHERE state IN ('PAYMENT_PENDING', 'INVENTORY_PENDING', 'COMPENSATING')
+               AND deadline_at < :now
+             ORDER BY deadline_at
+             LIMIT :limit
+               FOR UPDATE SKIP LOCKED
+            """)
+        .param("now", ts(now))
+        .param("limit", limit)
+        .query(this::map)
+        .list();
+  }
+
+  /**
    * Writes the new state if nobody else changed the row since we read it.
    *
    * @throws OptimisticLockingFailureException if {@code expectedVersion} is stale

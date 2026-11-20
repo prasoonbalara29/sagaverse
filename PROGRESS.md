@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 4 (outbox, inbox, idempotency) — done. Next: 5 (sweeper, timeouts, chaos)
+## Current phase: 5a (timeout sweeper) — done. Next: 5b (F8 failing refunds, F9 late reply)
 
 ### Phase checklist
 
@@ -19,10 +19,56 @@
 | 3c | Retry + DLT wiring, poison-message test (F7) | ✅ done |
 | 4a | Transactional outbox + relay in all services, FaultInjector, InvariantChecker, F4 naive vs reliable | ✅ done |
 | 4b | Inbox + sagaId business idempotency, F3 naive vs reliable, default mode → reliable | ✅ done |
-| 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | ⏳ next |
+| 5a | Timeout sweeper + state machine timeouts + late-reservation rule, F5/F6 naive vs reliable | ✅ done |
+| 5b | F8 (refund fails transiently / forever → COMPENSATION_FAILED), F9 (late reservation after cancellation) | ⏳ next |
+| 5c | Jib images, `make up-all`, `make chaos-inventory`, `make demo` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 5a (timeouts)
+- **`SagaStateMachine.onTimeout`** (pure):
+  - PAYMENT_PENDING / INVENTORY_PENDING resend the step with a new deadline, up to `max-step-attempts`.
+  - Then compensate everything that may have happened: Refund for payment, Release + Refund for inventory.
+  - COMPENSATING resends the outstanding compensations up to `max-compensation-attempts`, then goes to
+    **COMPENSATION_FAILED** (order `CANCELLED_NEEDS_ATTENTION`, ERROR log).
+  - Terminal sagas ignore timeouts.
+- **Late reservation (F9 rule):** `StockReserved` after cancellation sends `ReleaseStock`, unless one is already pending.
+- `Decision` now carries `stepAttempts` explicitly (previously it was inferred in the orchestrator).
+- **`SagaOrchestrator`** has one `apply()` path for replies and timeouts. `handleTimeouts(limit)` runs over
+  `SagaRepository.lockDue` (`FOR UPDATE SKIP LOCKED`). Decisions log as `saga X -> Y on T (attempt n)`.
+- **`SagaTimeoutSweeper`** (reliable mode only): a `SchedulingConfigurer` with `addFixedDelayTask(…, saga.sweep-interval)`.
+- `InvariantChecker.STUCK_SAGA` now needs the deadline to be **more than 1 s** past. That's the grace for the 500 ms
+  sweeper, because otherwise a healthy reliable saga caught between its deadline and the next sweep would be flagged.
+- `SagaStateMachineTest`: +12 tests (25 total) for timeouts, exhaustion, compensation retries, COMPENSATION_FAILED,
+  terminal sagas, and the late-reservation cases.
+- The e2e mode tests now run order-service with a 2 s step timeout, 3 attempts, 20 compensation attempts and a 500 ms sweep.
+
+**Scenarios.**
+- **F5:** inventory is stopped and an order placed. The test waits 3 s (longer than one step timeout), restarts
+  inventory, and lets the saga settle.
+- **F6:** inventory is stopped and an order placed. The test waits until only `ReleaseStock` is pending (reliable)
+  or 15 s pass (naive), takes a snapshot, then restarts inventory.
+
+*An honest correction to the plan:* the plan's table said naive F5 "hangs". It doesn't. Stopping a consumer leaves the
+command in Kafka, so naive mode recovers once inventory returns. It just never resends. Naive's real crash danger is the
+commit-then-send window, which is F4. The naive tests assert exactly this.
+
+**Step 1: prove the problem** (reliable assertions run in naive mode). Real output:
+```
+f5: [sweeper resent ReserveStock] Expecting actual: 1 to be greater than: 1
+f6: Expecting empty but was: [STUCK_SAGA saga=37cdb147… state=INVENTORY_PENDING order=PENDING deadline=…17:47:21Z]
+[ERROR] Tests run: 7, Failures: 5   (f3a, f3b, f4 as before; f1, f2 pass)
+```
+**Step 2: implement** (above). **Step 3: green.** Prediction: F5 attempts ≥ 2 then COMPLETED with one reservation. F6 COMPENSATING
+with only `[ReleaseStock]` left while inventory is down (no violations), then COMPENSATED with money and stock both net zero.
+**Result: matched.** The F6 timeline is in ADR-0009 (attempt 1 → 2 → 3, two seconds apart, then COMPENSATING; refund at once;
+when inventory returns, reserve once, two stored-outcome replies, release; three late `StockReserved` ignored; COMPENSATED).
+```
+$ make verify
+Tests run: 25 SagaStateMachineTest | 7 ReliableModeE2EIT | 7 NaiveModeE2EIT | 3 PoisonMessageE2EIT | 2 FailurePathsE2EIT | 1 HappyPathE2EIT | ...
+BUILD SUCCESS   (89 tests)
+```
 
 ### Done in Phase 4b (inbox + business idempotency, F3; reliable becomes the default)
 **Scenarios added** (`ScenarioRunner`, run by both `ReliableModeE2EIT` and `NaiveModeE2EIT`):
@@ -501,10 +547,12 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 5: timeouts and crash recovery.
-- `SagaTimeoutSweeper` (reliable only): finds stuck sagas with `FOR UPDATE SKIP LOCKED` and resends the step (new eventId,
-  safe thanks to 4b) until `max-step-attempts` runs out, then compensates everything that may have happened. COMPENSATING
-  resends compensations until `max-compensation-attempts`, then COMPENSATION_FAILED.
-- Scenarios: F5 (inventory crashes mid-saga, then recovers), F6 (inventory down past the deadline, then compensated),
-  F8 (refunds fail transiently, `payment.refund-fail-rate`), F9 (late StockReserved after cancellation, so ReleaseStock).
-- Then Jib images, `make up-all`, `make chaos-inventory` and `make demo`. Likely 5a (sweeper + F5/F6/F8/F9) and 5b (containers + chaos).
+Phase 5b:
+- **F8, failing refunds.** Add `payment.refund-fail-times` (deterministic: the first N refunds throw). With N = 5 the refund
+  outlasts Kafka's retries, goes to the DLT, is resent by the sweeper, and the saga still ends COMPENSATED. With N large the
+  saga ends COMPENSATION_FAILED / CANCELLED_NEEDS_ATTENTION, and `UNREFUNDED_CHARGE` is reported for a human. Naive mode
+  stays stuck in COMPENSATING.
+- **F9, late reservation.** An out-of-stock saga is COMPENSATED, stock is restocked, then a ReserveStock resend (new eventId)
+  arrives late. It reserves, and the orchestrator must release it, leaving no `ORPHAN_RESERVATION`.
+
+Then 5c: Jib images, `make up-all`, `make chaos-inventory`, `make demo`.

@@ -39,6 +39,9 @@ class NaiveModeE2EIT {
     cluster =
         new SagaverseCluster(POSTGRES, KAFKA, MODE)
             .with(ORDER, "saga.step-timeout", "2s")
+            .with(ORDER, "saga.max-step-attempts", 3)
+            .with(ORDER, "saga.max-compensation-attempts", 20)
+            .with(ORDER, "saga.sweep-interval", "500ms")
             .with(PAYMENT, "payment.decline-amount-over", "100.00")
             .startAll();
     scenarios = new ScenarioRunner(cluster);
@@ -83,6 +86,34 @@ class NaiveModeE2EIT {
     assertThat(invariants.check(sagaId))
         .extracting(Violation::kind)
         .containsExactlyInAnyOrder(Kind.DOUBLE_CHARGE, Kind.WRONG_CHARGE, Kind.DOUBLE_RESERVATION);
+  }
+
+  /**
+   * F5 is correct in naive mode too. Kafka kept the unread ReserveStock, so once inventory is back
+   * the saga finishes. Naive mode just never resends.
+   */
+  @Test
+  void f5_inventoryBrieflyDown_completesOnceItsBack_withoutResending() {
+    var outage = scenarios.inventoryBriefOutage();
+
+    assertThat(outage.attemptsWhileDown()).isEqualTo(1);
+    assertThat(scenarios.state(outage.sagaId())).isEqualTo("COMPLETED");
+    assertThat(invariants.check(outage.sagaId())).isEmpty();
+  }
+
+  /**
+   * F6: while inventory is down, the order hangs in PENDING with the customer charged, for as long
+   * as the outage lasts. Nothing gives up and nothing refunds.
+   */
+  @Test
+  void f6_inventoryDownPastDeadline_hangsForAsLongAsTheOutage() {
+    var outage = scenarios.inventoryLongOutage();
+
+    assertThat(outage.stateWhileDown()).isEqualTo("INVENTORY_PENDING");
+    assertThat(outage.attemptsWhileDown()).isEqualTo(1);
+    assertThat(outage.violationsWhileDown())
+        .extracting(Violation::kind)
+        .containsExactly(Kind.STUCK_SAGA);
   }
 
   @Test

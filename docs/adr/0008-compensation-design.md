@@ -36,7 +36,9 @@ eventually, so the fake gateway can fail a refund only transiently (`payment.ref
   RefundPayment, plus ReleaseStock if a ReserveStock was ever sent. We can't know whether a timed-out
   step ran, and idempotent no-ops make over-compensating safe.
 - A late success after cancellation (e.g. `StockReserved` while COMPENSATING or COMPENSATED) → send
-  ReleaseStock.
+  ReleaseStock, unless a ReleaseStock is already pending. It travels behind the reservation on the
+  same partition, so it will undo it. A terminal saga stays terminal, and only the release goes out.
+  A COMPENSATING saga also adds ReleaseStock to its pending list.
 
 **When a compensation fails:**
 1. Kafka blocking retries in the consumer (ADR-0007).

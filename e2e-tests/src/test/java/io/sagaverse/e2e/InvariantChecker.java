@@ -40,9 +40,15 @@ final class InvariantChecker {
     DOUBLE_RESERVATION,
     /** Order CANCELLED but stock is still held. */
     ORPHAN_RESERVATION,
-    /** The saga is not in a terminal state and its step deadline has passed. */
+    /**
+     * Not terminal, and the step deadline passed more than {@link #STUCK_GRACE} ago. The grace
+     * leaves the sweeper (500 ms in tests) time to act. Without it, a healthy saga caught between
+     * its deadline and the next sweep would be flagged.
+     */
     STUCK_SAGA
   }
+
+  static final java.time.Duration STUCK_GRACE = java.time.Duration.ofSeconds(1);
 
   private final SagaverseCluster cluster;
 
@@ -108,7 +114,9 @@ final class InvariantChecker {
     }
     boolean terminal =
         List.of("COMPLETED", "FAILED", "COMPENSATED", "COMPENSATION_FAILED").contains(state);
-    if (!terminal && deadline != null && deadline.toInstant().isBefore(Instant.now())) {
+    if (!terminal
+        && deadline != null
+        && deadline.toInstant().isBefore(Instant.now().minus(STUCK_GRACE))) {
       out.add(
           new Violation(
               Kind.STUCK_SAGA,

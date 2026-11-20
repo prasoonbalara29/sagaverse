@@ -1,5 +1,6 @@
 package io.sagaverse.e2e;
 
+import static io.sagaverse.e2e.SagaverseCluster.Service.INVENTORY;
 import static io.sagaverse.e2e.SagaverseCluster.Service.ORDER;
 import static org.awaitility.Awaitility.await;
 
@@ -106,7 +107,88 @@ final class ScenarioRunner {
     return sagaId;
   }
 
+  /**
+   * @param sagaId the saga the scenario created
+   * @param attemptsWhileDown how many times the stuck step had been sent while inventory was down
+   * @param stateWhileDown saga state just before inventory came back
+   * @param violationsWhileDown invariant violations just before inventory came back
+   */
+  record OutageOutcome(
+      UUID sagaId,
+      int attemptsWhileDown,
+      String stateWhileDown,
+      List<InvariantChecker.Violation> violationsWhileDown) {}
+
+  /**
+   * F5: inventory-service is down for longer than one step timeout, but less than the whole step
+   * budget, then comes back. Kafka keeps the unread ReserveStock, so the saga can finish. The
+   * difference between modes is that reliable mode also resends in the meantime, and must still
+   * reserve only once.
+   */
+  OutageOutcome inventoryBriefOutage() {
+    cluster.stop(INVENTORY);
+    UUID sagaId = placeWithoutSettling("f5-", "SKU-2", 1, "8.00");
+    await().atMost(SETTLE).until(() -> "INVENTORY_PENDING".equals(state(sagaId)));
+    // Keep inventory down past one step timeout (2 s in tests), so the deadline really passes.
+    await().pollDelay(Duration.ofSeconds(3)).atMost(Duration.ofSeconds(4)).until(() -> true);
+    var outcome = snapshot(sagaId);
+    cluster.start(INVENTORY);
+    awaitSettled(sagaId);
+    return outcome;
+  }
+
+  /**
+   * F6: inventory-service stays down past the whole step budget (3 attempts x 2 s in tests).
+   * Reliable mode gives up and compensates: it refunds right away, and the stock release waits for
+   * inventory. Naive mode just waits. Then inventory comes back.
+   */
+  OutageOutcome inventoryLongOutage() {
+    cluster.stop(INVENTORY);
+    UUID sagaId = placeWithoutSettling("f6-", "SKU-2", 1, "9.00");
+    try {
+      // Reliable: wait until the refund is confirmed and only the stock release is outstanding.
+      await()
+          .atMost(SETTLE.plusSeconds(5))
+          .until(() -> List.of("ReleaseStock").equals(pending(sagaId)));
+    } catch (ConditionTimeoutException naiveJustWaits) {
+      // Naive: nothing happens while inventory is down. That's the point.
+    }
+    var outcome = snapshot(sagaId);
+    cluster.start(INVENTORY);
+    awaitSettled(sagaId);
+    return outcome;
+  }
+
   // --- helpers ---------------------------------------------------------------------------
+
+  private OutageOutcome snapshot(UUID sagaId) {
+    return new OutageOutcome(
+        sagaId, attempts(sagaId), state(sagaId), new InvariantChecker(cluster).check(sagaId));
+  }
+
+  private UUID placeWithoutSettling(String prefix, String sku, int qty, String amount) {
+    String customer = prefix + UUID.randomUUID();
+    placeOrder(customer, sku, qty, amount);
+    return sagaOf(customer);
+  }
+
+  int attempts(UUID sagaId) {
+    return cluster
+        .db(ORDER)
+        .queryForObject(
+            "SELECT step_attempts FROM saga_instance WHERE saga_id = ?", Integer.class, sagaId);
+  }
+
+  List<String> pending(UUID sagaId) {
+    String json =
+        cluster
+            .db(ORDER)
+            .queryForObject(
+                "SELECT compensations_pending::text FROM saga_instance WHERE saga_id = ?",
+                String.class,
+                sagaId);
+    return json.equals("[]") ? List.of() : List.of(json.replaceAll("[\\[\\]\" ]", "").split(","));
+  }
 
   private UUID placeAndSettle(String prefix, String sku, int qty, String amount) {
     String customer = prefix + UUID.randomUUID();

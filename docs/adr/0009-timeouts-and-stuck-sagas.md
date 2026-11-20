@@ -35,6 +35,24 @@ Defaults (`@ConfigurationProperties("saga")`):
 
 Re-sending is safe because commands are idempotent by sagaId (ADR-0005).
 
+**Implementation (Phase 5a):** `SagaStateMachine.onTimeout` (pure, unit-tested) decides, and
+`SagaOrchestrator.handleTimeouts` applies the decisions inside one transaction over
+`SagaRepository.lockDue` (`… FOR UPDATE SKIP LOCKED`). `SagaTimeoutSweeper` (reliable mode only)
+schedules that every `saga.sweep-interval`. `step_attempts` counts sends of the current step, and in
+COMPENSATING it counts compensation rounds. The `compensation_attempts` column from V1 is therefore
+unused, and is kept to avoid a migration that only drops it.
+
+**Measured, F6** (inventory down; e2e config: 2 s step timeout, 3 attempts, 500 ms sweep):
+```
+17:50:24.983 PAYMENT_PENDING -> INVENTORY_PENDING on PaymentCharged (attempt 1)
+17:50:27.123 INVENTORY_PENDING -> INVENTORY_PENDING on Timeout (attempt 2)
+17:50:29.154 INVENTORY_PENDING -> INVENTORY_PENDING on Timeout (attempt 3)
+17:50:31.178 INVENTORY_PENDING -> COMPENSATING on Timeout, awaiting [ReleaseStock, RefundPayment]
+17:50:31.540 COMPENSATING -> COMPENSATING on PaymentRefunded, awaiting [ReleaseStock]
+   (inventory restarts: reserves once, answers 2 resends from the stored outcome, then releases)
+17:50:31.949 COMPENSATING -> COMPENSATED on StockReleased
+```
+
 ## Consequences
 
 - A slow but healthy service just causes an extra (deduped) command.

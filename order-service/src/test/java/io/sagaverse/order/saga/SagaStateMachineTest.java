@@ -2,6 +2,7 @@ package io.sagaverse.order.saga;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.sagaverse.events.InventoryMessages.ReleaseStock;
 import io.sagaverse.events.InventoryMessages.ReserveStock;
 import io.sagaverse.events.InventoryMessages.StockReleased;
 import io.sagaverse.events.InventoryMessages.StockReserved;
@@ -41,8 +42,21 @@ class SagaStateMachineTest {
           "order-1", "cust-1", "SKU-1", 2, new BigDecimal("42.50"), Order.Status.PENDING, NOW, NOW);
 
   private static SagaInstance sagaIn(SagaState state, String... pending) {
+    return attempt(state, 1, pending);
+  }
+
+  private static SagaInstance attempt(SagaState state, int attempts, String... pending) {
     return new SagaInstance(
-        UUID.randomUUID(), "order-1", state, "Whatever", 1, List.of(pending), NOW, 3, NOW, NOW);
+        UUID.randomUUID(),
+        "order-1",
+        state,
+        "Whatever",
+        attempts,
+        List.of(pending),
+        NOW,
+        3,
+        NOW,
+        NOW);
   }
 
   @Test
@@ -210,6 +224,108 @@ class SagaStateMachineTest {
         .isTrue();
     assertThat(machine.onReply(sagaIn(SagaState.COMPENSATED), order, unavailable).ignored())
         .isTrue();
+  }
+
+  // --- timeouts (ADR-0009) ------------------------------------------------------------------
+
+  @Test
+  void paymentPending_timeoutWithAttemptsLeft_resendsChargeWithFreshDeadline() {
+    var d = machine.onTimeout(attempt(SagaState.PAYMENT_PENDING, 1), order);
+
+    assertThat(d.to()).isEqualTo(SagaState.PAYMENT_PENDING);
+    assertThat(d.trigger()).isEqualTo("Timeout");
+    assertThat(d.stepAttempts()).isEqualTo(2);
+    assertThat(d.deadlineAt()).isEqualTo(NOW.plus(STEP_TIMEOUT));
+    assertThat(d.commands())
+        .containsExactly(new ChargePayment("order-1", "cust-1", new BigDecimal("42.50")));
+  }
+
+  @Test
+  void paymentPending_attemptsExhausted_refundsBecauseAChargeMayHaveHappened() {
+    var d = machine.onTimeout(attempt(SagaState.PAYMENT_PENDING, 6), order);
+
+    assertThat(d.to()).isEqualTo(SagaState.COMPENSATING);
+    assertThat(d.commands()).containsExactly(new RefundPayment("order-1", "PAYMENT_TIMEOUT"));
+    assertThat(d.compensationsPending()).containsExactly("RefundPayment");
+    assertThat(d.stepAttempts()).isEqualTo(1);
+  }
+
+  @Test
+  void inventoryPending_attemptsExhausted_releasesAndRefunds() {
+    var d = machine.onTimeout(attempt(SagaState.INVENTORY_PENDING, 6), order);
+
+    assertThat(d.to()).isEqualTo(SagaState.COMPENSATING);
+    assertThat(d.commands())
+        .containsExactly(
+            new ReleaseStock("order-1", "INVENTORY_TIMEOUT"),
+            new RefundPayment("order-1", "INVENTORY_TIMEOUT"));
+    assertThat(d.compensationsPending()).containsExactly("ReleaseStock", "RefundPayment");
+  }
+
+  @Test
+  void compensating_timeout_resendsOnlyTheOutstandingCompensations() {
+    var d = machine.onTimeout(attempt(SagaState.COMPENSATING, 3, "RefundPayment"), order);
+
+    assertThat(d.to()).isEqualTo(SagaState.COMPENSATING);
+    assertThat(d.stepAttempts()).isEqualTo(4);
+    assertThat(d.commands()).containsExactly(new RefundPayment("order-1", "RETRY"));
+    assertThat(d.compensationsPending()).containsExactly("RefundPayment");
+  }
+
+  @Test
+  void compensating_attemptsExhausted_stopsAndNeedsAHuman() {
+    var d = machine.onTimeout(attempt(SagaState.COMPENSATING, 10, "RefundPayment"), order);
+
+    assertThat(d.to()).isEqualTo(SagaState.COMPENSATION_FAILED);
+    assertThat(d.to().isTerminal()).isTrue();
+    assertThat(d.orderStatus()).contains(Order.Status.CANCELLED_NEEDS_ATTENTION);
+    assertThat(d.commands()).isEmpty();
+    assertThat(d.compensationsPending()).as("kept for the human").containsExactly("RefundPayment");
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = SagaState.class,
+      names = {"COMPLETED", "FAILED", "COMPENSATED", "COMPENSATION_FAILED"})
+  void terminalSagas_ignoreTimeouts(SagaState state) {
+    assertThat(machine.onTimeout(attempt(state, 1), order).ignored()).isTrue();
+  }
+
+  // --- F9: late reservation after cancellation --------------------------------------------------
+
+  @Test
+  void lateStockReserved_afterCompensated_sendsReleaseButStaysTerminal() {
+    var d =
+        machine.onReply(
+            sagaIn(SagaState.COMPENSATED), order, new StockReserved("order-1", "SKU-1", 2));
+
+    assertThat(d.ignored()).isFalse();
+    assertThat(d.to()).isEqualTo(SagaState.COMPENSATED);
+    assertThat(d.commands()).containsExactly(new ReleaseStock("order-1", "LATE_RESERVATION"));
+    assertThat(d.orderStatus()).isEmpty();
+  }
+
+  @Test
+  void lateStockReserved_whileCompensatingWithoutRelease_addsReleaseToPending() {
+    var d =
+        machine.onReply(
+            sagaIn(SagaState.COMPENSATING, "RefundPayment"),
+            order,
+            new StockReserved("order-1", "SKU-1", 2));
+
+    assertThat(d.commands()).containsExactly(new ReleaseStock("order-1", "LATE_RESERVATION"));
+    assertThat(d.compensationsPending()).containsExactly("RefundPayment", "ReleaseStock");
+  }
+
+  @Test
+  void lateStockReserved_whileReleaseAlreadyInFlight_isIgnored() {
+    var d =
+        machine.onReply(
+            sagaIn(SagaState.COMPENSATING, "ReleaseStock", "RefundPayment"),
+            order,
+            new StockReserved("order-1", "SKU-1", 2));
+
+    assertThat(d.ignored()).isTrue();
   }
 
   @Test

@@ -94,43 +94,75 @@ public class SagaOrchestrator {
             return null;
           }
           Order order = orders.findById(saga.orderId()).orElseThrow();
-          Decision decision = machine.onReply(saga, order, reply.payload());
-          if (decision.ignored()) {
-            return decision;
-          }
-          Instant now = clock.instant();
-          int attempts = decision.to() == saga.state() ? saga.stepAttempts() : 1;
-          sagas.update(
-              new SagaInstance(
-                  saga.sagaId(),
-                  saga.orderId(),
-                  decision.to(),
-                  decision.nextStep(),
-                  attempts,
-                  decision.compensationsPending(),
-                  decision.deadlineAt(),
-                  saga.version(),
-                  saga.createdAt(),
-                  now),
-              saga.version());
-          decision.orderStatus().ifPresent(s -> orders.updateStatus(order.orderId(), s, now));
-          sagas.recordTransition(
-              saga.sagaId(), decision.from(), decision.to(), decision.trigger(), now);
-          publisher.publish(saga.sagaId(), decision.commands());
-          return decision;
+          return apply(saga, order, machine.onReply(saga, order, reply.payload()));
         });
-    if (d == null) {
-      return;
+    if (d != null) {
+      logDecision(d);
     }
+  }
+
+  /**
+   * Handles up to {@code limit} sagas whose step deadline has passed (ADR-0009). Rows are locked
+   * with {@code FOR UPDATE SKIP LOCKED}, so a saga a reply is updating right now is skipped this
+   * round, not blocked on. Returns how many sagas were handled.
+   */
+  public int handleTimeouts(int limit) {
+    Integer handled =
+        tx.execute(status -> {
+          var due = sagas.lockDue(clock.instant(), limit);
+          for (SagaInstance saga : due) {
+            try (var a = MDC.putCloseable("sagaId", saga.sagaId().toString());
+                var b = MDC.putCloseable("orderId", saga.orderId())) {
+              Order order = orders.findById(saga.orderId()).orElseThrow();
+              logDecision(apply(saga, order, machine.onTimeout(saga, order)));
+            }
+          }
+          return due.size();
+        });
+    return handled == null ? 0 : handled;
+  }
+
+  /** Writes one decision: saga row, order status, history, outgoing commands. Same transaction. */
+  private Decision apply(SagaInstance saga, Order order, Decision decision) {
+    if (decision.ignored()) {
+      return decision;
+    }
+    Instant now = clock.instant();
+    sagas.update(
+        new SagaInstance(
+            saga.sagaId(),
+            saga.orderId(),
+            decision.to(),
+            decision.nextStep(),
+            decision.stepAttempts(),
+            decision.compensationsPending(),
+            decision.deadlineAt(),
+            saga.version(),
+            saga.createdAt(),
+            now),
+        saga.version());
+    decision.orderStatus().ifPresent(s -> orders.updateStatus(order.orderId(), s, now));
+    sagas.recordTransition(saga.sagaId(), decision.from(), decision.to(), decision.trigger(), now);
+    publisher.publish(saga.sagaId(), decision.commands());
+    return decision;
+  }
+
+  private void logDecision(Decision d) {
     if (d.ignored()) {
-      log.warn("ignored {}: {}", reply.type(), d.ignoredReason());
+      log.warn("ignored {}: {}", d.trigger(), d.ignoredReason());
+    } else if (d.to() == SagaState.COMPENSATION_FAILED) {
+      log.error(
+          "saga {} -> COMPENSATION_FAILED: compensations {} never confirmed. Order needs a human.",
+          d.from(),
+          d.compensationsPending());
     } else {
       log.info(
-          "saga {} -> {} on {}{}",
+          "saga {} -> {} on {} (attempt {}){}",
           d.from(),
           d.to(),
           d.trigger(),
-          d.compensationsPending().isEmpty() ? "" : " (awaiting " + d.compensationsPending() + ")");
+          d.stepAttempts(),
+          d.compensationsPending().isEmpty() ? "" : " awaiting " + d.compensationsPending());
     }
   }
 }
