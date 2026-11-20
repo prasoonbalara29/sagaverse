@@ -20,7 +20,7 @@ export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE ?= /run/podman/podman.sock
 COMPOSE := podman compose
 MVN := ./mvnw -B -ntp
 
-.PHONY: help check-java check-podman up down ps logs topics consume test verify fmt
+.PHONY: help check-java check-podman up down ps logs topics consume build test verify fmt
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  %-16s %s\n",$$1,$$2}'
@@ -55,6 +55,9 @@ consume: ## Print messages on a topic: make consume TOPIC=payment.commands
 	@test -n "$(TOPIC)" || { echo "usage: make consume TOPIC=<topic>"; exit 1; }
 	$(COMPOSE) exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
 	  --topic $(TOPIC) --from-beginning --property print.key=true --property key.separator=' | '
+
+build: check-java ## Install all modules locally (needed once before ./mvnw -pl <svc> spring-boot:run)
+	$(MVN) install -DskipTests
 
 test: check-java ## Unit tests only (*Test)
 	$(MVN) test

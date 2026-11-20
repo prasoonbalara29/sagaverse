@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 1b (local infra) — done. Next: 1c (service skeletons)
+## Current phase: 1c (service skeletons) — done. Next: 2 (happy path)
 
 ### Phase checklist
 
@@ -9,14 +9,51 @@
 | 0 | git init, AGENTS.md, README skeleton, PROGRESS.md, ADRs 0001–0011 | ✅ done |
 | 1a | `./mvnw`, parent POM (enforcer, Spotless, Error Prone, Jib), `events` module + `EnvelopeTest` | ✅ done |
 | 1b | `compose.yaml` (Postgres + 3 DBs/users, Kafka KRaft, topics-init), Makefile | ✅ done |
-| 1c | 3 service skeletons, Flyway V1, actuator health, `*ApplicationIT` (Testcontainers) | ⏳ next |
-| 2 | Happy path end to end (naive mode), `.http` file, `HappyPathE2EIT` | pending |
+| 1c | 3 service skeletons, Flyway V1, actuator health, `*ApplicationIT` (Testcontainers) | ✅ done |
+| 2 | Happy path end to end (naive mode), `.http` file, `HappyPathE2EIT` | ⏳ next |
 | 3 | Declines and compensations (F1, F2, F7 naive) | pending |
 | 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 1c
+- `order-service` (8081), `payment-service` (8082) and `inventory-service` (8083):
+  - Spring Boot apps with web, actuator, validation, JDBC, Spring Kafka, Flyway and the PostgreSQL driver.
+  - The Boot fat jar uses the `exec` classifier, so the plain jar can be a dependency of e2e-tests.
+  - `application.yml` per service: own DB and user, `KAFKA_BOOTSTRAP`/`DB_HOST` overridable,
+    `enable-auto-commit: false`, `acks=all` plus an idempotent producer, BigDecimal-for-floats,
+    health with details and probes, ECS structured logs.
+- Flyway `V1__init.sql` per service, with the tables from the ADRs:
+  - order: `orders`, `saga_instance` (version column, partial due-index for the sweeper), `saga_transition`, `outbox`, `inbox`.
+  - payment: `payment` (saga_id UNIQUE), `ledger` (append-only, no unique key on purpose), `outbox`, `inbox`.
+  - inventory: `stock`, `reservation` (saga_id PK, quantity 0 = tombstone), `outbox`, `inbox`, plus seed SKU-1=100, SKU-2=10, SKU-EMPTY=0.
+- `*ServiceApplicationIT` per service, using Testcontainers Postgres + Kafka with `@ServiceConnection`. They check:
+  health UP including the DB, Flyway created exactly that service's tables, the Kafka broker is reachable,
+  and (inventory) the stock is seeded.
+- `testcontainers.properties` per service: `hub.image.name.prefix=docker.intuit.com/docker-rmt/`. This also
+  covers Ryuk, and works from IntelliJ, not only from Maven.
+- `make build` target. The README "How to run" section now covers dev mode.
+- File count: 21 (above the ~15 guideline). Most of it is per-service boilerplate repeated 3×. I didn't split
+  further, because each phase must cover all three services.
+
+### Real output (Phase 1c)
+```
+$ make verify
+Tests run: 18, Failures: 0 ... EnvelopeTest
+Tests run: 3, Failures: 0 ... OrderServiceApplicationIT
+Tests run: 3, Failures: 0 ... PaymentServiceApplicationIT
+Tests run: 4, Failures: 0 ... InventoryServiceApplicationIT
+events / order-service / payment-service / inventory-service ... SUCCESS
+BUILD SUCCESS
+
+Dev mode (make up, then ./mvnw -pl <svc> spring-boot:run for all three):
+8081: UP db=UP   8082: UP db=UP   8083: UP db=UP
+{"@timestamp":"…","log":{"level":"INFO","logger":"io.sagaverse.order.OrderServiceApplication"},…,"service":{"name":"order-service"…},"message":"Started OrderServiceApplication in …
+```
+Prediction before the run: health UP with the db component, exact table sets per V1, 1 Kafka node, 3 seeded SKUs.
+Result: matched. No differences.
 
 ### Done in Phase 1b
 - `compose.yaml`:
@@ -94,10 +131,13 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   `~/.m2/settings.xml` mirror.
 
 ### Open issues
-- Testcontainers must also use the mirror, including its Ryuk image. 1c adds `hub.image.name.prefix` and checks it.
+- Jackson `JsonNodeFactory.withExactBigDecimals(true)` can't be set via properties. Phase 2 adds a mapper customizer
+  in each service (ADR-0011).
 - Jib runs on the host JDK. Pulling the base image from `docker.intuit.com` should work, but that's untested until Phase 5.
 - `podman compose` delegates to Rancher Desktop's `docker-compose` v5 binary, pointed at the Podman socket. It works,
   but it prints a banner on every call.
 
 ### Next step
-Phase 1c: order, payment and inventory skeletons (Flyway V1, actuator health, `*ApplicationIT` with Testcontainers).
+Phase 2: happy path in naive mode. `POST /orders`, the orchestrator state machine (unit-tested per transition),
+the payment and inventory command handlers, the `e2e-tests` module and `HappyPathE2EIT`, and `requests.http`.
+Phase 2 will be well over 15 files, so I'll propose a split (2a: orchestrator + order API, 2b: handlers + e2e) when I start it.

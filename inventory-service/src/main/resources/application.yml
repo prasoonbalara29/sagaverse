@@ -1,0 +1,48 @@
+# inventory-service. Defaults target dev mode: infra from `make up`, this service via ./mvnw spring-boot:run.
+# Containers (Phase 5) override DB_HOST and KAFKA_BOOTSTRAP. The password default matches the
+# dev-only default in compose.yaml. Override it through the environment, never commit a real one.
+server:
+  port: 8083
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/inventory_db
+    username: inventory_svc
+    password: ${INVENTORY_DB_PASSWORD:inventory_svc}
+  flyway:
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: inventory-service
+      # Offsets are committed only after the DB transaction commits (ADR-0005).
+      enable-auto-commit: false
+      auto-offset-reset: earliest
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+  jackson:
+    # Money must not pass through double (ADR-0011). Exact BigDecimal tree nodes come in Phase 2.
+    deserialization:
+      use-big-decimal-for-floats: true
+    serialization:
+      write-dates-as-timestamps: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+
+logging:
+  structured:
+    format:
+      console: ecs

@@ -5,7 +5,7 @@ A hands-on learning repo for the **saga pattern (orchestration)**. Three Spring 
 implementation corrupts data, then fixes it with a persisted saga, compensations, a transactional
 outbox, an inbox and a timeout sweeper. Every claim is backed by a test.
 
-> **Status:** Phase 0 (docs and decisions only). See [PROGRESS.md](PROGRESS.md). Sections marked
+> **Status:** Phase 1c (skeletons: infra plus three services with health checks; no saga yet). See [PROGRESS.md](PROGRESS.md). Sections marked
 > _TBD_ get filled in as phases land.
 
 ## The problem
@@ -138,12 +138,18 @@ Every message uses the envelope `{eventId, sagaId, type, version, occurredAt, pa
 
 ## How to run
 
-_TBD (Phase 1b onward)._ Prerequisites: Podman with a running machine, and `JAVA_HOME` set
-explicitly to a Java 21 JDK:
+Prerequisites: Podman with a running machine (`podman machine start`), and `JAVA_HOME` set explicitly
+to a Java 21 JDK. Images come from the internal mirror `docker.intuit.com/docker-rmt` (see ADR-0011).
 
 ```bash
 export JAVA_HOME=<path-to-intended-jdk>/Contents/Home
+make up        # Postgres (3 DBs) + Kafka + topics
+make build     # install modules locally
+./mvnw -pl order-service spring-boot:run      # likewise payment-service, inventory-service
+curl localhost:8081/actuator/health           # 8082 payment, 8083 inventory
 ```
+
+_The full 5-command demo arrives in Phase 5/6._
 
 ## Trade-offs, known limitations, what I'd do in production
 
