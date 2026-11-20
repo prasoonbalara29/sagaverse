@@ -16,6 +16,10 @@ Nothing selects a JDK by version number alone.
 **Message format:** JSON envelope `{eventId, sagaId, type, version, occurredAt, payload}`, with
 Jackson. The `events` module holds the records and constants only. No Schema Registry and no Avro.
 Each consumer rejects an unknown `type` or unsupported `version` (they go to the DLT, ADR-0007).
+Every service's `ObjectMapper` **must** enable `USE_BIG_DECIMAL_FOR_FLOATS` and
+`JsonNodeFactory.withExactBigDecimals(true)`. Consumers read the payload as a `JsonNode` before
+converting it, and Jackson's default would turn `42.50` into the double `42.5` and lose precision
+on money. `EnvelopeTest` caught this in Phase 1a.
 
 **Logging:** Spring Boot's built-in structured logging (`logging.structured.format.console=ecs`),
 with no extra dependency. `sagaId` and `orderId` are put into MDC by a Kafka `RecordInterceptor`
