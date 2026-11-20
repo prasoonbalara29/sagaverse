@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 5b (F8, F9) — done. Next: 5c (containers, chaos demo)
+## Current phase: 5 (timeouts, failures, containers, chaos) — done. Next: 6 (observability and docs)
 
 ### Phase checklist
 
@@ -21,10 +21,49 @@
 | 4b | Inbox + sagaId business idempotency, F3 naive vs reliable, default mode → reliable | ✅ done |
 | 5a | Timeout sweeper + state machine timeouts + late-reservation rule, F5/F6 naive vs reliable | ✅ done |
 | 5b | F8 (refund fails transiently / forever → COMPENSATION_FAILED), F9 (late reservation after cancellation) | ✅ done |
-| 5c | Jib images, `make up-all`, `make chaos-inventory`, `make demo` | ⏳ next |
-| 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
+| 5c | Jib images, `make up-all`, `make chaos-inventory`, `make demo` | ✅ done |
+| 6 | Observability polish, `make trace`, full README, final summary + quiz | ⏳ next |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 5c (containers, demo, chaos)
+- **Jib images** into Podman: `make images` runs `install` + `jib:dockerBuild -Djib.dockerClient.executable=$(command -v podman)`.
+  The base image `docker.intuit.com/docker-rmt/library/amazoncorretto:21` pulled through the mirror with no certificate problem.
+  - The first build was `linux/amd64` on this arm64 Mac, which would run under emulation. The `arm64-host` profile now sets
+    `jib.arch=arm64`, and all three images are arm64 (~594 MB each, a full JDK).
+  - One arm64 base download broke midway (`Premature end of Content-Length … received 71,138,209 of 169,034,352`). That was a
+    network hiccup, and the retry succeeded.
+- **compose `apps` profile**: order/payment/inventory with `DB_HOST=postgres`, `KAFKA_BOOTSTRAP=kafka:9092`, `depends_on`
+  postgres/kafka `service_healthy` + topics-init `service_completed_successfully`, a curl readiness healthcheck, and `mem_limit: 384m`.
+- **Makefile**: `images`, `up-all` (images → up → `podman compose --profile apps up -d --wait …`), `demo`, `chaos-inventory`.
+  `down`/`ps`/`logs` now include the apps profile.
+- **scripts/**: `lib.sh` (bash + curl + sed helpers), `demo.sh`, `chaos-inventory.sh`.
+
+**Memory with the full stack up** (`podman stats`): kafka 471 MB / 805, postgres 86 / 268, order 299 / 403, payment 227 / 403,
+inventory 200 / 403. That's about 1.3 GB used and about 2.3 GB of limits, inside the ~3 GB budget.
+
+**Predict, then run.**
+- `make demo`: predicted happy CONFIRMED/COMPLETED, F1 CANCELLED/FAILED, F2 CANCELLED/COMPENSATED. **Matched.**
+- `make chaos-inventory`: predicted attempts 1 → 2 → 3 about 10 s apart while inventory is dead, then COMPLETED with two Timeout
+  self-transitions. **Difference:** the history shows **four** Timeout resends. The restarted inventory container took about 20 s
+  to become ready, which allowed two more step timeouts (still under the 6-attempt budget). Real output:
+```
+==> 1. Killing sagaverse-inventory-service-1 with SIGKILL (no graceful shutdown)
+    sagaverse-inventory-service-1: Exited (137) Less than a second ago
+==> 3. Saga is stuck waiting for inventory; the sweeper resends ReserveStock every step timeout (10s)
+    t+ 4s  order=PENDING   saga=INVENTORY_PENDING  attempts=1 deadline=…18:07:19Z
+    t+12s  order=PENDING   saga=INVENTORY_PENDING  attempts=2 deadline=…18:07:31Z
+    t+24s  order=PENDING   saga=INVENTORY_PENDING  attempts=3 deadline=…18:07:41Z
+==> 4. Restarting sagaverse-inventory-service-1 … inventory-service is ready
+==> 5. order=CONFIRMED saga=COMPLETED sagaId=48fb7808-f453-4426-8dae-e33cf6f6a763
+    null -> PAYMENT_PENDING (OrderPlaced); PAYMENT_PENDING -> INVENTORY_PENDING (PaymentCharged);
+    INVENTORY_PENDING -> INVENTORY_PENDING (Timeout) x4; INVENTORY_PENDING -> COMPLETED (StockReserved)
+```
+  Idempotency held under 5 deliveries of ReserveStock (the original + 4 resends). inventory_db has **one** reservation
+  `SKU-1|1|RESERVED`, payment_db has **one** `CHARGE|15.00`, and inventory's log shows `reserved 1 x SKU-1` once and
+  `stock already reserved for this saga: replying with the stored outcome` four times.
+- `make up-all` from a clean `make down`: exit 0, all five containers Healthy (topics-init Exited 0). `make demo` passed again.
+- `make verify` (with the container stack running alongside): BUILD SUCCESS, 94 tests.
 
 ### Done in Phase 5b (F8 failing refunds, F9 late reservation)
 - `payment.refund-fail-times=N`: the first N refunds throw a retryable `GatewayUnavailableException` (`FakeGateway.refund`,
@@ -589,10 +628,10 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 5c:
-- Jib images for the three services into Podman (`jib:dockerBuild -Djib.dockerClient.executable=podman`, base from the mirror).
-  Jib runs on the host JDK, so the Zscaler certificate may be a problem here. To be checked.
-- `compose.yaml` profile `apps` with the three services (`DB_HOST=postgres`, `KAFKA_BOOTSTRAP=kafka:9092`, healthchecks,
-  `-Xmx256m`, mem limits). `make up-all`.
-- `make demo` (curl the `.http` scenarios and print outcomes) and `make chaos-inventory`: `podman kill` inventory mid-saga, show
-  INVENTORY_PENDING with attempts rising, `podman start`, show COMPLETED.
+Phase 6: observability and docs.
+- sagaId/orderId on the `dead-lettering …` lines (found missing in 5b).
+- `org.apache.kafka` logging set to WARN.
+- `make trace SAGA=<id>` greps all three services' logs.
+- README in full: problem, diagrams, run in ≤ 5 commands, the measured naive-vs-reliable table, trade-offs, limitations,
+  what I'd do in production, and a DLT replay command.
+- Final PROGRESS.md, the summary, and the five quiz questions.

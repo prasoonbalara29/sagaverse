@@ -18,9 +18,10 @@ export DOCKER_HOST ?= unix://$(PODMAN_SOCKET)
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE ?= /run/podman/podman.sock
 
 COMPOSE := podman compose
+PODMAN_BIN := $(shell command -v podman)
 MVN := ./mvnw -B -ntp
 
-.PHONY: help check-java check-podman up down ps logs topics consume build test verify fmt
+.PHONY: help check-java check-podman up up-all images down ps logs topics consume build test verify fmt demo chaos-inventory
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  %-16s %s\n",$$1,$$2}'
@@ -39,14 +40,28 @@ up: check-podman ## Start infra (postgres, kafka) and create topics
 	$(COMPOSE) up -d --wait postgres kafka
 	$(COMPOSE) run --rm topics-init
 
+images: check-java check-podman ## Build the three service images into Podman (Jib)
+	$(MVN) install -DskipTests
+	$(MVN) -pl order-service,payment-service,inventory-service jib:dockerBuild \
+	  -Djib.dockerClient.executable=$(PODMAN_BIN)
+
+up-all: images up ## Infra + the three services in containers (ports 8081-8083)
+	$(COMPOSE) --profile apps up -d --wait order-service payment-service inventory-service
+
+demo: ## Place one order per scenario (happy, declined, out of stock) and print the outcomes
+	@scripts/demo.sh
+
+chaos-inventory: ## Kill inventory mid-saga, watch the saga wait, restart it, watch it complete
+	@scripts/chaos-inventory.sh
+
 down: ## Stop and remove all containers
-	$(COMPOSE) down --remove-orphans
+	$(COMPOSE) --profile apps down --remove-orphans
 
 ps: ## Show containers and health
-	$(COMPOSE) ps
+	$(COMPOSE) --profile apps ps
 
-logs: ## Follow infra logs
-	$(COMPOSE) logs -f
+logs: ## Follow logs of all containers
+	$(COMPOSE) --profile apps logs -f
 
 topics: ## List topics with partition counts
 	$(COMPOSE) exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe | grep -E '^Topic:' | awk '{print $$2, $$6, $$8}' | sort | (echo "topic partitions rf"; cat) | column -t

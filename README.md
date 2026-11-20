@@ -5,7 +5,7 @@ A hands-on learning repo for the **saga pattern (orchestration)**. Three Spring 
 implementation corrupts data, then fixes it with a persisted saga, compensations, a transactional
 outbox, an inbox and a timeout sweeper. Every claim is backed by a test.
 
-> **Status:** Phase 5b (all failure modes F1 to F9 covered by e2e tests in both modes). Containers and the chaos demo are next. See [PROGRESS.md](PROGRESS.md). Sections marked
+> **Status:** Phase 5 done (all failure modes covered; containers, demo and chaos demo work). Phase 6 (observability, final docs) is next. See [PROGRESS.md](PROGRESS.md). Sections marked
 > _TBD_ get filled in as phases land.
 
 ## The problem
@@ -150,7 +150,15 @@ curl localhost:8081/actuator/health           # 8082 payment, 8083 inventory
 ```
 
 Then run the requests in [`requests.http`](requests.http) (IntelliJ HTTP client) to place an order and watch
-its saga with `GET /orders/{id}`. _The full 5-command demo arrives in Phase 5/6._
+its saga with `GET /orders/{id}`. **Full stack in containers** (what the demos use):
+
+```bash
+export JAVA_HOME=<path-to-intended-jdk>/Contents/Home
+make up-all            # builds the 3 images (Jib) and starts everything; waits until healthy
+make demo              # happy path, payment declined, out of stock -> prints each saga's outcome
+make chaos-inventory   # kills inventory mid-saga, shows resends, restarts it, saga completes
+make down
+```
 
 ## Trade-offs, known limitations, what I'd do in production
 

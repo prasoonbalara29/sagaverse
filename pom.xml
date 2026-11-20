@@ -41,6 +41,9 @@
 
     <!-- Base image for service containers. Change it if you choose a different JDK distribution. -->
     <jib.base.image>docker.intuit.com/docker-rmt/library/amazoncorretto:21</jib.base.image>
+    <!-- Image CPU architecture. The arm64-host profile below switches it on Apple Silicon, so
+         containers don't run under x86 emulation. -->
+    <jib.arch>amd64</jib.arch>
   </properties>
 
   <dependencyManagement>
@@ -52,6 +55,20 @@
       </dependency>
     </dependencies>
   </dependencyManagement>
+
+  <profiles>
+    <profile>
+      <id>arm64-host</id>
+      <activation>
+        <os>
+          <arch>aarch64</arch>
+        </os>
+      </activation>
+      <properties>
+        <jib.arch>arm64</jib.arch>
+      </properties>
+    </profile>
+  </profiles>
 
   <build>
     <pluginManagement>
@@ -94,6 +111,12 @@
           <configuration>
             <from>
               <image>${jib.base.image}</image>
+              <platforms>
+                <platform>
+                  <architecture>${jib.arch}</architecture>
+                  <os>linux</os>
+                </platform>
+              </platforms>
             </from>
             <to>
               <image>localhost/sagaverse/${project.artifactId}:latest</image>
@@ -102,9 +125,6 @@
               <jvmFlags>
                 <jvmFlag>-Xmx256m</jvmFlag>
               </jvmFlags>
-              <ports>
-                <port>8080</port>
-              </ports>
             </container>
           </configuration>
         </plugin>

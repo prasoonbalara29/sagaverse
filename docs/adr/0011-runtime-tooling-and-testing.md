@@ -66,6 +66,12 @@ available on the mirror, so the opt-in Kafka UI profile was dropped. Use `make t
 That's about 2.1 GB with everything up. Healthchecks are on every long-running service. Ordering uses
 `depends_on: condition: service_healthy` and `service_completed_successfully` (topics-init).
 
+**Images:** Jib builds straight into Podman (`make images`). The `arm64-host` Maven profile
+(activated by `os.arch=aarch64`) sets `jib.arch=arm64`, so on Apple Silicon the containers run
+natively. The first build defaulted to `linux/amd64`, which would run under emulation. The base is
+the full Corretto 21 JDK, about 594 MB per image. A headless JRE base would be smaller; that's a
+known limitation. Healthchecks use the `curl` in the base image against `/actuator/health/readiness`.
+
 **Run modes:** dev (`make up` starts infra; services run via `./mvnw -pl <svc> spring-boot:run`) and
 full (`make up-all` builds the Jib images with `-Djib.dockerClient.executable=podman` and starts everything).
 

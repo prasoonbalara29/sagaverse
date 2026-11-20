@@ -2,7 +2,7 @@
 # Images come from the internal Docker Hub mirror docker.intuit.com/docker-rmt (docker.io is blocked).
 #
 #   make up        infra only (postgres, kafka, topics-init), for dev mode with ./mvnw spring-boot:run
-#   make up-all    infra + the three services as containers (added in Phase 5)
+#   make up-all    infra + the three services as containers (profile "apps", images built by Jib)
 #
 # Credentials here are dev-only defaults. Override them through the environment or an untracked .env file.
 name: sagaverse
@@ -74,3 +74,77 @@ services:
     restart: "no"
     mem_limit: 256m
 
+  order-service:
+    profiles: ["apps"]
+    image: localhost/sagaverse/order-service:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      topics-init:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: postgres
+      KAFKA_BOOTSTRAP: kafka:9092
+      ORDER_DB_PASSWORD: ${ORDER_DB_PASSWORD:-order_svc}
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/actuator/health/readiness > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: "no"
+    mem_limit: 384m
+
+  payment-service:
+    profiles: ["apps"]
+    image: localhost/sagaverse/payment-service:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      topics-init:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: postgres
+      KAFKA_BOOTSTRAP: kafka:9092
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:-payment_svc}
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8082/actuator/health/readiness > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: "no"
+    mem_limit: 384m
+
+  inventory-service:
+    profiles: ["apps"]
+    image: localhost/sagaverse/inventory-service:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      topics-init:
+        condition: service_completed_successfully
+    environment:
+      DB_HOST: postgres
+      KAFKA_BOOTSTRAP: kafka:9092
+      INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD:-inventory_svc}
+    ports:
+      - "8083:8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/actuator/health/readiness > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    restart: "no"
+    mem_limit: 384m
