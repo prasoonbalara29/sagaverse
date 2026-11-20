@@ -21,7 +21,9 @@ import org.testcontainers.kafka.KafkaContainer;
  * Boots inventory-service against real Postgres and Kafka containers. Images resolve through the
  * mirror configured in testcontainers.properties.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+    webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+    properties = InventoryServiceApplication.CONFIG_NAME)
 @Testcontainers
 class InventoryServiceApplicationIT {
 

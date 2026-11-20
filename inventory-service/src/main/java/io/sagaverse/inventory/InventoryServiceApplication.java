@@ -1,13 +1,25 @@
 package io.sagaverse.inventory;
 
-import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.builder.SpringApplicationBuilder;
 
 /** Stock reservations and releases. */
 @SpringBootApplication
 public class InventoryServiceApplication {
 
+  /**
+   * This service reads {@code inventory-service.yml}, not {@code application.yml}. Every service
+   * jar can then sit on one classpath (the e2e tests boot all three in one JVM) without one
+   * service's config shadowing another's.
+   */
+  public static final String CONFIG_NAME = "spring.config.name=inventory-service";
+
+  /** The application as the e2e tests and {@link #main} both start it. */
+  public static SpringApplicationBuilder application() {
+    return new SpringApplicationBuilder(InventoryServiceApplication.class).properties(CONFIG_NAME);
+  }
+
   public static void main(String[] args) {
-    SpringApplication.run(InventoryServiceApplication.class, args);
+    application().run(args);
   }
 }

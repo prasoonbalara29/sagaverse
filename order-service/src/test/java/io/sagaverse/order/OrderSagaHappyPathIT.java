@@ -49,7 +49,9 @@ import org.testcontainers.kafka.KafkaContainer;
  * plays payment-service and inventory-service: it reads the commands order-service sends and
  * answers with replies. The real services join in Phase 2b's e2e test.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+    webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+    properties = OrderServiceApplication.CONFIG_NAME)
 @Testcontainers
 class OrderSagaHappyPathIT {
 

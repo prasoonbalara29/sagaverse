@@ -12,7 +12,8 @@ spring:
     username: inventory_svc
     password: ${INVENTORY_DB_PASSWORD:inventory_svc}
   flyway:
-    locations: classpath:db/migration
+    # Service-specific folder: three services' migrations can share one classpath (e2e tests).
+    locations: classpath:db/migration/inventory
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
     consumer:

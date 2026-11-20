@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 2b (payment + inventory handlers) — done. Next: 2c (e2e module)
+## Current phase: 2c (one-classpath refactor) — done. Next: 2d (e2e module)
 
 ### Phase checklist
 
@@ -12,13 +12,26 @@
 | 1c | 3 service skeletons, Flyway V1, actuator health, `*ApplicationIT` (Testcontainers) | ✅ done |
 | 2a | Order API, orchestrator state machine (happy path), naive publisher, reply listener, `OrderSagaHappyPathIT` | ✅ done |
 | 2b | Payment + inventory command handlers (naive), per-service command ITs | ✅ done |
-| 2c | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ⏳ next |
+| 2c | Per-service config name + migration folder, so all three jars can share one classpath | ✅ done |
+| 2d | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ⏳ next |
 | 3 | Declines and compensations (F1, F2, F7 naive) | pending |
 | 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 2c (refactor, no behavior change)
+**Why:** the e2e module boots all three services in one JVM (ADR-0011), so their jars share one classpath. Each jar had
+`application.yml` and `db/migration/V1__init.sql` at the same path. Spring would load only the first `application.yml`,
+and Flyway would see three `V1` migrations and refuse to start.
+- Each service's config is now `<svc>-service.yml`. `XServiceApplication.CONFIG_NAME` (`spring.config.name=<svc>-service`)
+  is applied by `main()` through `XServiceApplication.application()`, and by every `@SpringBootTest(properties = CONFIG_NAME)`.
+- Migrations moved to `db/migration/<svc>/`, with `spring.flyway.locations` per service.
+- Evidence that the config is really loaded: the "Flyway created exactly this service's tables" ITs still pass. They
+  would find no tables if the config were ignored. Dev mode via `main()` still works: inventory came up `UP`, and Flyway
+  said "Successfully validated 1 migration" against the compose DB.
+- 15 files (3 mains, 3 yml renames, 3 migration moves, 6 ITs) + PROGRESS.md.
 
 ### Done in Phase 2b (payment-service and inventory-service)
 - **payment-service `PaymentService`**: `ChargePayment` appends a `CHARGE` ledger row, upserts the per-saga `payment` row
@@ -240,6 +253,6 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 2c: the `e2e-tests` module boots order, payment and inventory in one JVM (separate contexts and DBs) against
+Phase 2d: the `e2e-tests` module boots order, payment and inventory in one JVM (separate contexts and DBs) against
 one Testcontainers Kafka + Postgres. `HappyPathE2EIT` places an order over HTTP and asserts the final state of all three
 DBs. Plus `requests.http`.

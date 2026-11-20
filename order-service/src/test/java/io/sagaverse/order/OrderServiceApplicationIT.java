@@ -21,7 +21,9 @@ import org.testcontainers.kafka.KafkaContainer;
  * Boots order-service against real Postgres and Kafka containers. Images resolve through the mirror
  * configured in testcontainers.properties.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+    webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+    properties = OrderServiceApplication.CONFIG_NAME)
 @Testcontainers
 class OrderServiceApplicationIT {
 

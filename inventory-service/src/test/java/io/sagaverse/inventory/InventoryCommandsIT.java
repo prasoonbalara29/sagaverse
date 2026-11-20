@@ -43,7 +43,7 @@ import org.testcontainers.kafka.KafkaContainer;
  * inventory-service handles ReserveStock end to end. The test plays the orchestrator: it sends
  * commands over real Kafka and reads the replies.
  */
-@SpringBootTest
+@SpringBootTest(properties = InventoryServiceApplication.CONFIG_NAME)
 @Testcontainers
 class InventoryCommandsIT {
 

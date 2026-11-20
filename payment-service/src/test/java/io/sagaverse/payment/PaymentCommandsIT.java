@@ -43,7 +43,7 @@ import org.testcontainers.kafka.KafkaContainer;
  * payment-service handles ChargePayment end to end. The test plays the orchestrator: it sends
  * commands over real Kafka and reads the replies.
  */
-@SpringBootTest
+@SpringBootTest(properties = PaymentServiceApplication.CONFIG_NAME)
 @Testcontainers
 class PaymentCommandsIT {
 
