@@ -40,7 +40,7 @@ class HappyPathE2EIT {
 
   @BeforeAll
   static void startServices() {
-    cluster = new SagaverseCluster(POSTGRES, KAFKA, "naive").startAll();
+    cluster = new SagaverseCluster(POSTGRES, KAFKA, "reliable").startAll();
     orders = RestClient.create(cluster.baseUrl(ORDER));
   }
 

@@ -34,6 +34,18 @@ Use two layers. Both are checked inside the consumer's local DB transaction.
    - Orchestrator: replies go through the inbox, and the state machine also ignores a reply that
      doesn't fit the current state.
 
+**Where it lives:** `IdempotencyGuard` in each service (`firstDelivery(envelope)` and
+`checkBusinessKeys()`), called first thing inside the handler's transaction. In reliable mode it's the
+`Inbox` implementation (`INSERT … ON CONFLICT (event_id) DO NOTHING`, true if one row was inserted).
+In naive mode it's `TrustEveryDelivery` (always true / false).
+
+**Measured (Phase 4b, `ReliableModeE2EIT` vs `NaiveModeE2EIT`):**
+
+| Scenario | Naive | Reliable |
+|---|---|---|
+| F3a: same ChargePayment + ReserveStock records redelivered | `DOUBLE_CHARGE chargeRows=2 net=22.00`, `WRONG_CHARGE net=22.00 amount=11.00`, `DOUBLE_RESERVATION held=2 ordered=1` | 0 violations. Inbox: "duplicate delivery of ChargePayment … skipped" (and ReserveStock) |
+| F3b: same commands, new eventIds | the same three violations (net=24.00 for a 12.00 order) | 0 violations. "charge for this saga already CHARGED: replying with the stored outcome" (and for stock) |
+
 **Offsets:** `enable.auto.commit=false` and `AckMode.RECORD`. The listener runs inside the DB
 transaction, and the offset is committed after the DB commit. A crash in between causes a
 redelivery, which the inbox absorbs.

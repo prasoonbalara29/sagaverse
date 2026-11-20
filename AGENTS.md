@@ -27,7 +27,7 @@ demonstrable correctness matter more than production completeness. Read
 3. **Kafka only between services.** No HTTP calls from one service to another.
 4. **Every topic is keyed by `orderId`** (ADR-0002).
 5. **Every state change and its outgoing message happen in one local DB transaction**, through the
-   outbox in `reliable` mode (ADR-0004). The `naive` mode is kept on purpose so the bugs stay
+   outbox in `reliable` mode (ADR-0004). `reliable` is the default `saga.mode`. The `naive` mode is kept on purpose so the bugs stay
    reproducible. Don't "fix" it.
 6. **Consumers must be idempotent.** Replaying any message twice must not change the outcome (ADR-0005).
 7. **No new dependencies without the owner's approval.** Approved so far: Spring Boot 3.x (web, actuator,

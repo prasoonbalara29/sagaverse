@@ -109,6 +109,10 @@ final class SagaverseCluster implements AutoCloseable {
     }
   }
 
+  String bootstrapServers() {
+    return kafka.getBootstrapServers();
+  }
+
   String baseUrl(Service s) {
     var ctx = (WebServerApplicationContext) running.get(s);
     return "http://localhost:" + ctx.getWebServer().getPort();

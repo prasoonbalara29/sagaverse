@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 4a (outbox, F4) — done. Next: 4b (inbox + idempotency, F3)
+## Current phase: 4 (outbox, inbox, idempotency) — done. Next: 5 (sweeper, timeouts, chaos)
 
 ### Phase checklist
 
@@ -18,11 +18,59 @@
 | 3b | F1/F2 e2e red first, then orchestrator FAILED / COMPENSATING / COMPENSATED | ✅ done |
 | 3c | Retry + DLT wiring, poison-message test (F7) | ✅ done |
 | 4a | Transactional outbox + relay in all services, FaultInjector, InvariantChecker, F4 naive vs reliable | ✅ done |
-| 4b | Inbox + sagaId business idempotency, F3 naive vs reliable, default mode → reliable | ⏳ next |
-| 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
+| 4b | Inbox + sagaId business idempotency, F3 naive vs reliable, default mode → reliable | ✅ done |
+| 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | ⏳ next |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 4b (inbox + business idempotency, F3; reliable becomes the default)
+**Scenarios added** (`ScenarioRunner`, run by both `ReliableModeE2EIT` and `NaiveModeE2EIT`):
+- F1 and F2, which must be correct in both modes.
+- **F3a, redelivery:** after the saga completes, the exact `ChargePayment` and `ReserveStock` records (same bytes, same
+  eventId) are found on the topics and sent again.
+- **F3b, logical resend:** the same commands with a new eventId (`KafkaTool.withNewEventId`, using exact-decimal Jackson).
+
+The scenarios wait until the `payment-service` / `inventory-service` consumer groups have committed past the end of
+their topics (`KafkaTool.awaitConsumed`), so "processed" is measured rather than guessed.
+
+**Step 1: prove the problem** (reliable assertions run in naive mode). Real output:
+```
+f3a: Expecting empty but was: [DOUBLE_CHARGE saga=d4ccc724… chargeRows=2 net=22.00,
+                               WRONG_CHARGE saga=d4ccc724… net=22.00 amount=11.00,
+                               DOUBLE_RESERVATION saga=d4ccc724… held=2 ordered=1]
+f3b: Expecting empty but was: [DOUBLE_CHARGE … chargeRows=2 net=24.00, WRONG_CHARGE … net=24.00 amount=12.00,
+                               DOUBLE_RESERVATION … held=2 ordered=1]
+f1, f2: pass (as predicted).   f4: fails (as expected in naive mode).
+```
+**A mistake of mine, caught by this step:** the first red run also failed F1 (`expected "FAILED" but was "COMPLETED"`).
+My edit adding `payment.decline-amount-over=100.00` to both mode tests had silently matched nothing, because Spotless had
+reformatted the line, so the 500.00 charge was approved. I fixed it, and the edit scripts now assert that every replacement
+matched. The next attempt was blocked by that assertion (a missing import), and the run after that produced the output above.
+
+**Step 2: fix.**
+- `IdempotencyGuard` per service. `Inbox` (reliable) does `INSERT … ON CONFLICT (event_id) DO NOTHING` inside the handler's
+  transaction. `TrustEveryDelivery` (naive) always processes.
+- Called first in `PaymentService.handle`, `InventoryService.handle` and `SagaOrchestrator.onReply`.
+- Business keys (reliable): a `ChargePayment` for a saga with a payment row replies with the stored outcome
+  (CHARGED → same paymentId and amount; DECLINED → same reason). A `ReserveStock` for a saga with a RESERVED row replies
+  `StockReserved` with the stored sku and qty. Tombstones keep working in both modes.
+- **Default `saga.mode` is now `reliable`**: every yml, `SagaProperties`, and `matchIfMissing` on the reliable beans.
+  `HappyPathE2EIT`, `FailurePathsE2EIT` and `PoisonMessageE2EIT` now run in reliable mode. Naive runs only in `NaiveModeE2EIT`.
+
+**Step 3: green.** Prediction: F3a skipped by the inbox, F3b answered from stored outcomes, 0 violations; naive still shows
+the three violations. **Result: matched**, and the log proves the mechanism (ReliableModeE2EIT run):
+```
+1 x payment   | duplicate delivery of ChargePayment … skipped                                  (F3a)
+1 x inventory | duplicate delivery of ReserveStock … skipped                                   (F3a)
+1 x payment   | charge for this saga already CHARGED: replying with the stored outcome         (F3b)
+1 x inventory | stock already reserved for this saga: replying with the stored outcome         (F3b)
+$ make verify
+Tests run: 5 ReliableModeE2EIT | 5 NaiveModeE2EIT | 3 PoisonMessageE2EIT | 2 FailurePathsE2EIT | 1 HappyPathE2EIT | ...
+BUILD SUCCESS   (73 tests)
+```
+Docs: ADR-0005 (where the guard lives, plus the measured naive vs reliable table), ADR-0010 (default is reliable), AGENTS.md,
+and the README results table (F1 to F4 filled in).
 
 ### Done in Phase 4a (transactional outbox, F4 lost event)
 **Test harness (ADR-0010):**
@@ -453,7 +501,10 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 4b: F3 duplicate delivery. Two flavors: (1) the exact same record redelivered (same eventId), (2) a logical resend
-(new eventId, same sagaId) of ChargePayment and ReserveStock. Show red first (expect DOUBLE_CHARGE + DOUBLE_RESERVATION), then
-add the inbox (eventId PK, in the handler's transaction) and sagaId business idempotency (reply with the stored outcome)
-behind `saga.mode=reliable`. Then switch the default `saga.mode` to reliable.
+Phase 5: timeouts and crash recovery.
+- `SagaTimeoutSweeper` (reliable only): finds stuck sagas with `FOR UPDATE SKIP LOCKED` and resends the step (new eventId,
+  safe thanks to 4b) until `max-step-attempts` runs out, then compensates everything that may have happened. COMPENSATING
+  resends compensations until `max-compensation-attempts`, then COMPENSATION_FAILED.
+- Scenarios: F5 (inventory crashes mid-saga, then recovers), F6 (inventory down past the deadline, then compensated),
+  F8 (refunds fail transiently, `payment.refund-fail-rate`), F9 (late StockReserved after cancellation, so ReleaseStock).
+- Then Jib images, `make up-all`, `make chaos-inventory` and `make demo`. Likely 5a (sweeper + F5/F6/F8/F9) and 5b (containers + chaos).

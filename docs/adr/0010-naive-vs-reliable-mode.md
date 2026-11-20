@@ -16,7 +16,7 @@ swaps the strategy beans:
 | Concern | naive | reliable |
 |---|---|---|
 | `MessagePublisher` | `DirectKafkaPublisher`: commit, then `kafka.send()` (dual write). Hosts the `FaultInjector` "crash after DB commit" hook. | `OutboxPublisher`: inserts into `outbox` in the same transaction. `OutboxRelay` publishes. |
-| `IdempotencyGuard` | No-op: always processes | `InboxGuard` plus the sagaId business check |
+| `IdempotencyGuard` | `TrustEveryDelivery`: always processes | `Inbox` (eventId) plus the sagaId business check |
 | `SagaTimeoutSweeper` | Disabled | Enabled |
 
 The schema is **the same in both modes**. Naive code simply doesn't use the outbox, inbox or
@@ -36,6 +36,9 @@ README results table.
 
 While building each fix, the reliable assertion is first run against naive mode, to show it fail
 for real. That output is pasted into PROGRESS.md.
+
+**Default:** `reliable` (each service's yml, `SagaProperties`, and `matchIfMissing` on the reliable
+beans). Naive runs only when a test or demo asks for it explicitly.
 
 ## Consequences
 

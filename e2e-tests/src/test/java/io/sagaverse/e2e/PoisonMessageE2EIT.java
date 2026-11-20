@@ -50,7 +50,7 @@ class PoisonMessageE2EIT {
 
   @BeforeAll
   static void start() {
-    cluster = new SagaverseCluster(POSTGRES, KAFKA, "naive").startAll();
+    cluster = new SagaverseCluster(POSTGRES, KAFKA, "reliable").startAll();
     var props = new Properties();
     props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
     props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);

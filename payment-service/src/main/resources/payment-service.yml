@@ -43,7 +43,7 @@ payment:
 
 # naive: dual write, no dedup. reliable (Phase 4): outbox + inbox (ADR-0010).
 saga:
-  mode: naive
+  mode: reliable
 
 # Retry + dead-letter policy (KafkaErrorHandling, ADR-0007): blocking retries after 1s, 2s, 4s,
 # then <topic>.DLT. Malformed / unknown-type / unsupported-version messages skip the retries.

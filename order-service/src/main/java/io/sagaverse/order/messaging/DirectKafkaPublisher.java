@@ -24,7 +24,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * F4, kept on purpose (ADR-0004, ADR-0010).
  */
 @Component
-@ConditionalOnProperty(name = "saga.mode", havingValue = "naive", matchIfMissing = true)
+@ConditionalOnProperty(name = "saga.mode", havingValue = "naive")
 public class DirectKafkaPublisher implements MessagePublisher {
 
   private static final Logger log = LoggerFactory.getLogger(DirectKafkaPublisher.class);

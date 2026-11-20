@@ -35,9 +35,10 @@ spring:
     serialization:
       write-dates-as-timestamps: false
 
-# Saga tuning (SagaProperties, ADR-0009/0010). Phase 2 runs in naive mode only.
+# Saga tuning (SagaProperties, ADR-0009/0010). mode: reliable (outbox + inbox) or naive (the buggy
+# dual-write version, kept for comparison).
 saga:
-  mode: naive
+  mode: reliable
   step-timeout: 10s
   max-step-attempts: 6
   max-compensation-attempts: 10

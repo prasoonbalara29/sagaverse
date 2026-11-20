@@ -5,7 +5,7 @@ A hands-on learning repo for the **saga pattern (orchestration)**. Three Spring 
 implementation corrupts data, then fixes it with a persisted saga, compensations, a transactional
 outbox, an inbox and a timeout sweeper. Every claim is backed by a test.
 
-> **Status:** Phase 3 (happy path, payment declined and out-of-stock refund work end to end in naive mode). See [PROGRESS.md](PROGRESS.md). Sections marked
+> **Status:** Phase 4 (reliable mode, with outbox + inbox, is the default; naive mode is kept to demonstrate the bugs). See [PROGRESS.md](PROGRESS.md). Sections marked
 > _TBD_ get filled in as phases land.
 
 ## The problem
@@ -126,9 +126,9 @@ Every message uses the envelope `{eventId, sagaId, type, version, occurredAt, pa
 
 | # | Scenario | Naive | Reliable |
 |---|---|---|---|
-| F1 | Payment declined | ✅ CANCELLED/FAILED, no money moved (`FailurePathsE2EIT`) | _TBD (Phase 4)_ |
-| F2 | Out of stock → refund | ✅ CANCELLED/COMPENSATED, ledger CHARGE 10 + REFUND −10 | _TBD (Phase 4)_ |
-| F3 | Duplicate delivery | _TBD_ | _TBD_ |
+| F1 | Payment declined | ✅ CANCELLED/FAILED, no money moved | ✅ same |
+| F2 | Out of stock → refund | ✅ CANCELLED/COMPENSATED, ledger CHARGE 10 + REFUND −10 | ✅ same |
+| F3 | Duplicate delivery (same eventId, or a resend with a new eventId) | ❌ `DOUBLE_CHARGE` (2 charge rows, net 22.00 on an 11.00 order) + `DOUBLE_RESERVATION` (2 held, 1 ordered) | ✅ 0 violations: inbox skips the redelivery; the sagaId check replies with the stored outcome to the resend |
 | F4 | Lost event after crash (dual write) | ❌ `STUCK_SAGA`: PAYMENT_PENDING forever, ChargePayment never sent, 0 durable copies | ✅ COMPLETED; the command survived in the outbox (1 unsent row at crash) and the relay sent it after restart |
 | F5 | Consumer crash mid-saga | _TBD_ | _TBD_ |
 | F6 | Service down past deadline | _TBD_ | _TBD_ |

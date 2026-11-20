@@ -15,7 +15,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  */
 @ConfigurationProperties("saga")
 public record SagaProperties(
-    @DefaultValue("naive") Mode mode,
+    @DefaultValue("reliable") Mode mode,
     @DefaultValue("10s") Duration stepTimeout,
     @DefaultValue("6") int maxStepAttempts,
     @DefaultValue("10") int maxCompensationAttempts,

@@ -8,6 +8,7 @@ import io.sagaverse.events.PaymentMessages.PaymentDeclined;
 import io.sagaverse.events.PaymentMessages.PaymentRefunded;
 import io.sagaverse.events.PaymentMessages.RefundPayment;
 import io.sagaverse.events.SagaPayload;
+import io.sagaverse.payment.messaging.IdempotencyGuard;
 import io.sagaverse.payment.messaging.MessagePublisher;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
@@ -43,6 +44,7 @@ public class PaymentService {
   private final TransactionTemplate tx;
   private final MessagePublisher publisher;
   private final FakeGateway gateway;
+  private final IdempotencyGuard guard;
   private final Clock clock;
 
   public PaymentService(
@@ -50,16 +52,23 @@ public class PaymentService {
       TransactionTemplate tx,
       MessagePublisher publisher,
       FakeGateway gateway,
+      IdempotencyGuard guard,
       Clock clock) {
     this.jdbc = jdbc;
     this.tx = tx;
     this.publisher = publisher;
     this.gateway = gateway;
+    this.guard = guard;
     this.clock = clock;
   }
 
   public void handle(EventEnvelope<PaymentCommand> command) {
     tx.executeWithoutResult(status -> {
+      if (!guard.firstDelivery(command)) {
+        log.info(
+            "duplicate delivery of {} (eventId={}) skipped", command.type(), command.eventId());
+        return;
+      }
       SagaPayload reply =
           switch (command.payload()) {
             case ChargePayment charge -> charge(command.sagaId(), charge);
@@ -72,9 +81,18 @@ public class PaymentService {
   private SagaPayload charge(UUID sagaId, ChargePayment c) {
     var now = Timestamp.from(clock.instant());
 
-    if (find(sagaId).map(p -> p.status().equals("REFUNDED")).orElse(false)) {
+    Optional<Payment> existing = find(sagaId);
+    if (existing.map(p -> p.status().equals("REFUNDED")).orElse(false)) {
       log.info("declining charge: saga was already refunded (tombstone)");
       return new PaymentDeclined(c.orderId(), SAGA_CANCELLED);
+    }
+    if (guard.checkBusinessKeys() && existing.isPresent()) {
+      // Reliable: this saga was already charged (or declined). Repeat the answer, don't move money.
+      Payment p = existing.get();
+      log.info("charge for this saga already {}: replying with the stored outcome", p.status());
+      return p.status().equals("CHARGED")
+          ? new PaymentCharged(c.orderId(), p.paymentId(), p.amount())
+          : new PaymentDeclined(c.orderId(), p.reason() == null ? p.status() : p.reason());
     }
 
     Optional<String> declined = gateway.decline(c);
@@ -86,7 +104,7 @@ public class PaymentService {
 
     // The money movement. Append-only, so a second charge is visible as a second row.
     insertLedger(sagaId, c.orderId(), c.customerId(), "CHARGE", c.amount(), now);
-    // Naive: upsert blindly, so a duplicate doesn't fail and nothing notices it already happened.
+    // Naive mode reaches here on every duplicate: the upsert hides it, and the ledger shows it.
     UUID paymentId = upsertPayment(UUID.randomUUID(), sagaId, c, "CHARGED", null, now);
     log.info("charged {} to {}", c.amount(), c.customerId());
     return new PaymentCharged(c.orderId(), paymentId, c.amount());
@@ -140,11 +158,15 @@ public class PaymentService {
   // --- persistence --------------------------------------------------------------------------
 
   private record Payment(
-      UUID paymentId, String status, @Nullable String customerId, @Nullable BigDecimal amount) {}
+      UUID paymentId,
+      String status,
+      @Nullable String reason,
+      @Nullable String customerId,
+      @Nullable BigDecimal amount) {}
 
   private Optional<Payment> find(UUID sagaId) {
     return jdbc.sql(
-            "SELECT payment_id, status, customer_id, amount FROM payment WHERE saga_id = :s")
+            "SELECT payment_id, status, reason, customer_id, amount FROM payment WHERE saga_id = :s")
         .param("s", sagaId)
         .query(PaymentService::mapPayment)
         .optional();
@@ -153,7 +175,7 @@ public class PaymentService {
   /** Row lock: two refunds for the same saga can't both see CHARGED. */
   private Optional<Payment> findForUpdate(UUID sagaId) {
     return jdbc.sql(
-            "SELECT payment_id, status, customer_id, amount FROM payment WHERE saga_id = :s"
+            "SELECT payment_id, status, reason, customer_id, amount FROM payment WHERE saga_id = :s"
                 + " FOR UPDATE")
         .param("s", sagaId)
         .query(PaymentService::mapPayment)
@@ -164,6 +186,7 @@ public class PaymentService {
     return new Payment(
         rs.getObject("payment_id", UUID.class),
         rs.getString("status"),
+        rs.getString("reason"),
         rs.getString("customer_id"),
         rs.getBigDecimal("amount"));
   }

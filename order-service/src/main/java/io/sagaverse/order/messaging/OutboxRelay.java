@@ -28,7 +28,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  */
 @Component
 @EnableScheduling
-@ConditionalOnProperty(name = "saga.mode", havingValue = "reliable")
+@ConditionalOnProperty(name = "saga.mode", havingValue = "reliable", matchIfMissing = true)
 public class OutboxRelay {
 
   private static final Logger log = LoggerFactory.getLogger(OutboxRelay.class);

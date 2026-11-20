@@ -4,6 +4,7 @@ import static io.sagaverse.e2e.SagaverseCluster.Service.ORDER;
 import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.sagaverse.events.Topics;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +74,69 @@ final class ScenarioRunner {
     return new CrashOutcome(sagaId, unsent);
   }
 
+  /** F1: amount above payment.decline-amount-over (the tests set 100.00). */
+  UUID paymentDeclined() {
+    return placeAndSettle("f1-", "SKU-1", 1, "500.00");
+  }
+
+  /** F2: SKU-EMPTY has no stock, so the charge must be refunded. */
+  UUID outOfStock() {
+    return placeAndSettle("f2-", "SKU-EMPTY", 1, "10.00");
+  }
+
+  /**
+   * F3a, redelivery: once the saga has completed, the exact ChargePayment and ReserveStock records
+   * (same bytes, same eventId) are delivered again. That's what Kafka does when a consumer dies
+   * before committing its offset.
+   */
+  UUID duplicateRedelivery() {
+    UUID sagaId = placeAndSettle("f3a-", "SKU-1", 1, "11.00");
+    replayCommands(sagaId, false);
+    return sagaId;
+  }
+
+  /**
+   * F3b, logical resend: the same commands again, but each in a <b>new</b> envelope (new eventId,
+   * same sagaId). That's what a retrying orchestrator does (the Phase 5 sweeper). An eventId inbox
+   * alone can't catch it.
+   */
+  UUID logicalResend() {
+    UUID sagaId = placeAndSettle("f3b-", "SKU-1", 1, "12.00");
+    replayCommands(sagaId, true);
+    return sagaId;
+  }
+
   // --- helpers ---------------------------------------------------------------------------
+
+  private UUID placeAndSettle(String prefix, String sku, int qty, String amount) {
+    String customer = prefix + UUID.randomUUID();
+    placeOrder(customer, sku, qty, amount);
+    UUID sagaId = sagaOf(customer);
+    awaitSettled(sagaId);
+    return sagaId;
+  }
+
+  private void replayCommands(UUID sagaId, boolean newEventId) {
+    String orderId = orderOf(sagaId);
+    var kafka = new KafkaTool(cluster.bootstrapServers());
+    for (String[] tt :
+        new String[][] {
+          {Topics.PAYMENT_COMMANDS, "ChargePayment"}, {Topics.INVENTORY_COMMANDS, "ReserveStock"}
+        }) {
+      var original = kafka.find(tt[0], orderId, tt[1]);
+      String value = newEventId ? KafkaTool.withNewEventId(original.value()) : original.value();
+      kafka.send(tt[0], original.key(), value);
+    }
+    kafka.awaitConsumed("payment-service", Topics.PAYMENT_COMMANDS);
+    kafka.awaitConsumed("inventory-service", Topics.INVENTORY_COMMANDS);
+  }
+
+  private String orderOf(UUID sagaId) {
+    return cluster
+        .db(ORDER)
+        .queryForObject(
+            "SELECT order_id FROM saga_instance WHERE saga_id = ?", String.class, sagaId);
+  }
 
   private void placeOrder(String customer, String sku, int qty, String amount) {
     RestClient.create(cluster.baseUrl(ORDER))

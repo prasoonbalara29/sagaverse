@@ -39,6 +39,7 @@ class NaiveModeE2EIT {
     cluster =
         new SagaverseCluster(POSTGRES, KAFKA, MODE)
             .with(ORDER, "saga.step-timeout", "2s")
+            .with(PAYMENT, "payment.decline-amount-over", "100.00")
             .startAll();
     scenarios = new ScenarioRunner(cluster);
     invariants = new InvariantChecker(cluster);
@@ -47,6 +48,41 @@ class NaiveModeE2EIT {
   @AfterAll
   static void stop() {
     cluster.close();
+  }
+
+  /** F1 and F2 don't depend on delivery guarantees, so naive mode gets them right too. */
+  @Test
+  void f1_paymentDeclined_isCorrectEvenInNaiveMode() {
+    UUID sagaId = scenarios.paymentDeclined();
+
+    assertThat(invariants.check(sagaId)).isEmpty();
+    assertThat(scenarios.state(sagaId)).isEqualTo("FAILED");
+  }
+
+  @Test
+  void f2_outOfStock_isCorrectEvenInNaiveMode() {
+    UUID sagaId = scenarios.outOfStock();
+
+    assertThat(invariants.check(sagaId)).isEmpty();
+    assertThat(scenarios.state(sagaId)).isEqualTo("COMPENSATED");
+  }
+
+  @Test
+  void f3a_redeliveredCommands_chargeAndReserveTwice() {
+    UUID sagaId = scenarios.duplicateRedelivery();
+
+    assertThat(invariants.check(sagaId))
+        .extracting(Violation::kind)
+        .containsExactlyInAnyOrder(Kind.DOUBLE_CHARGE, Kind.WRONG_CHARGE, Kind.DOUBLE_RESERVATION);
+  }
+
+  @Test
+  void f3b_resentCommandsWithNewEventIds_chargeAndReserveTwice() {
+    UUID sagaId = scenarios.logicalResend();
+
+    assertThat(invariants.check(sagaId))
+        .extracting(Violation::kind)
+        .containsExactlyInAnyOrder(Kind.DOUBLE_CHARGE, Kind.WRONG_CHARGE, Kind.DOUBLE_RESERVATION);
   }
 
   @Test

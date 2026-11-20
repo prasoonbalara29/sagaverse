@@ -19,7 +19,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * it takes.
  */
 @Component
-@ConditionalOnProperty(name = "saga.mode", havingValue = "reliable")
+@ConditionalOnProperty(name = "saga.mode", havingValue = "reliable", matchIfMissing = true)
 public class OutboxPublisher implements MessagePublisher {
 
   private final JdbcClient jdbc;

@@ -44,7 +44,7 @@ class FailurePathsE2EIT {
   @BeforeAll
   static void startServices() {
     cluster =
-        new SagaverseCluster(POSTGRES, KAFKA, "naive")
+        new SagaverseCluster(POSTGRES, KAFKA, "reliable")
             .with(PAYMENT, "payment.decline-amount-over", "100.00")
             .startAll();
     orders = RestClient.create(cluster.baseUrl(ORDER));

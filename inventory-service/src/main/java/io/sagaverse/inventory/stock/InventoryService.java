@@ -8,6 +8,7 @@ import io.sagaverse.events.InventoryMessages.StockReleased;
 import io.sagaverse.events.InventoryMessages.StockReserved;
 import io.sagaverse.events.InventoryMessages.StockUnavailable;
 import io.sagaverse.events.SagaPayload;
+import io.sagaverse.inventory.messaging.IdempotencyGuard;
 import io.sagaverse.inventory.messaging.MessagePublisher;
 import java.sql.Timestamp;
 import java.time.Clock;
@@ -38,18 +39,29 @@ public class InventoryService {
   private final JdbcClient jdbc;
   private final TransactionTemplate tx;
   private final MessagePublisher publisher;
+  private final IdempotencyGuard guard;
   private final Clock clock;
 
   public InventoryService(
-      JdbcClient jdbc, TransactionTemplate tx, MessagePublisher publisher, Clock clock) {
+      JdbcClient jdbc,
+      TransactionTemplate tx,
+      MessagePublisher publisher,
+      IdempotencyGuard guard,
+      Clock clock) {
     this.jdbc = jdbc;
     this.tx = tx;
     this.publisher = publisher;
+    this.guard = guard;
     this.clock = clock;
   }
 
   public void handle(EventEnvelope<InventoryCommand> command) {
     tx.executeWithoutResult(status -> {
+      if (!guard.firstDelivery(command)) {
+        log.info(
+            "duplicate delivery of {} (eventId={}) skipped", command.type(), command.eventId());
+        return;
+      }
       SagaPayload reply =
           switch (command.payload()) {
             case ReserveStock reserve -> reserve(command.sagaId(), reserve);
@@ -62,9 +74,15 @@ public class InventoryService {
   private SagaPayload reserve(UUID sagaId, ReserveStock r) {
     var now = Timestamp.from(clock.instant());
 
-    if (findForUpdate(sagaId).map(x -> x.status().equals("RELEASED")).orElse(false)) {
+    Optional<Reservation> existing = findForUpdate(sagaId);
+    if (existing.map(x -> x.status().equals("RELEASED")).orElse(false)) {
       log.info("refusing reservation: saga was already released (tombstone)");
       return new StockUnavailable(r.orderId(), r.sku(), StockUnavailable.SAGA_CANCELLED);
+    }
+    if (guard.checkBusinessKeys() && existing.isPresent()) {
+      // Reliable: stock is already held for this saga. Repeat the answer, don't take more.
+      log.info("stock already reserved for this saga: replying with the stored outcome");
+      return new StockReserved(r.orderId(), existing.get().sku(), existing.get().quantity());
     }
 
     // Atomic check-and-decrement: one statement, so two concurrent reservations can't both take the

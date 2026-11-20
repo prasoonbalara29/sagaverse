@@ -2,6 +2,7 @@ package io.sagaverse.order.saga;
 
 import io.sagaverse.events.EventEnvelope;
 import io.sagaverse.events.SagaPayload;
+import io.sagaverse.order.messaging.IdempotencyGuard;
 import io.sagaverse.order.messaging.MessagePublisher;
 import io.sagaverse.order.order.Order;
 import io.sagaverse.order.order.OrderRepository;
@@ -31,6 +32,7 @@ public class SagaOrchestrator {
   private final SagaRepository sagas;
   private final SagaStateMachine machine;
   private final MessagePublisher publisher;
+  private final IdempotencyGuard guard;
   private final Clock clock;
 
   public SagaOrchestrator(
@@ -39,12 +41,14 @@ public class SagaOrchestrator {
       SagaRepository sagas,
       SagaStateMachine machine,
       MessagePublisher publisher,
+      IdempotencyGuard guard,
       Clock clock) {
     this.tx = tx;
     this.orders = orders;
     this.sagas = sagas;
     this.machine = machine;
     this.publisher = publisher;
+    this.guard = guard;
     this.clock = clock;
   }
 
@@ -79,6 +83,11 @@ public class SagaOrchestrator {
   public void onReply(EventEnvelope<? extends SagaPayload> reply) {
     Decision d =
         tx.execute(status -> {
+          if (!guard.firstDelivery(reply)) {
+            log.info(
+                "duplicate delivery of {} (eventId={}) skipped", reply.type(), reply.eventId());
+            return null;
+          }
           var saga = sagas.findById(reply.sagaId()).orElse(null);
           if (saga == null) {
             log.warn("ignoring {}: unknown saga", reply.type());
