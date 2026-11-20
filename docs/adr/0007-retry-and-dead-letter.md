@@ -13,8 +13,6 @@ pill".
 
 ## Decision
 
-- **Deserialization:** `ErrorHandlingDeserializer` wraps the JSON deserializer, so a bad record
-  reaches the error handler instead of crashing the consumer loop.
 - **Retries:** Spring Kafka `DefaultErrorHandler` with **blocking** `ExponentialBackOffWithMaxRetries`:
   the first attempt plus 3 retries after 1s, 2s and 4s (`messaging.retry.*`, see `KafkaErrorHandling` in
   each service). Blocking means the partition waits, which keeps per-order ordering intact (ADR-0002).
