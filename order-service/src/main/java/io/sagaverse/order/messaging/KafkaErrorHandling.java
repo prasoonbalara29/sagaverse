@@ -3,9 +3,12 @@ package io.sagaverse.order.messaging;
 import io.sagaverse.events.Topics;
 import io.sagaverse.order.messaging.EnvelopeCodec.MessageRejectedException;
 import java.time.Duration;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
@@ -50,6 +53,20 @@ public class KafkaErrorHandling {
       @DefaultValue("2.0") double multiplier,
       @DefaultValue("3") int maxRetries) {}
 
+  private static final Pattern SAGA_ID =
+      Pattern.compile("\"sagaId\"\\s*:\\s*\"([0-9a-fA-F-]{36})\"");
+
+  /** Best effort: the record may be garbage, which is often why it is being dead-lettered. */
+  static String sagaIdOf(Object value) {
+    if (value instanceof String json) {
+      Matcher m = SAGA_ID.matcher(json);
+      if (m.find()) {
+        return m.group(1);
+      }
+    }
+    return "unknown";
+  }
+
   @Bean
   DefaultErrorHandler kafkaErrorHandler(
       KafkaTemplate<String, String> template, RetryProperties retry) {
@@ -57,12 +74,16 @@ public class KafkaErrorHandling {
         new DeadLetterPublishingRecoverer(
             template,
             (record, ex) -> {
-              log.error(
-                  "dead-lettering {}-{}@{}: {}",
-                  record.topic(),
-                  record.partition(),
-                  record.offset(),
-                  ex.getCause() != null ? ex.getCause().toString() : ex.toString());
+              // The listener's MDC is gone by now, so restore it from the record for traceability.
+              try (var o = MDC.putCloseable("orderId", String.valueOf(record.key()));
+                  var s = MDC.putCloseable("sagaId", sagaIdOf(record.value()))) {
+                log.error(
+                    "dead-lettering {}-{}@{}: {}",
+                    record.topic(),
+                    record.partition(),
+                    record.offset(),
+                    ex.getCause() != null ? ex.getCause().toString() : ex.toString());
+              }
               return new TopicPartition(Topics.dlt(record.topic()), record.partition());
             });
     var backOff = new ExponentialBackOffWithMaxRetries(retry.maxRetries());

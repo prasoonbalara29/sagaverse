@@ -24,7 +24,10 @@ on money. `EnvelopeTest` caught this in Phase 1a.
 **Logging:** Spring Boot's built-in structured logging (`logging.structured.format.console=ecs`),
 with no extra dependency. `sagaId` and `orderId` are put into MDC by a Kafka `RecordInterceptor`
 (read from the envelope and the key), a servlet filter (REST), and wrappers around relay and sweeper
-work. Every log line within a saga can be found with one grep.
+work. The dead-letter recoverer restores `orderId` (record key) and `sagaId` (parsed from the value,
+or `unknown`) before it logs, because the listener's MDC is already gone at that point.
+`org.apache.kafka` logs at WARN. `make trace SAGA=<id>` merges one saga's lines from all three
+containers in time order.
 
 **Quality gates (`make verify`):** Spotless (google-java-format) check, Error Prone at compile time,
 Surefire (`*Test`), Failsafe (`*IT`).

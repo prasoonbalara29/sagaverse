@@ -28,13 +28,19 @@ pill".
 - **Business recovery:** a command in the DLT never gets a reply. The saga's step deadline expires,
   and the sweeper re-sends the command or compensates (ADR-0009, ADR-0008). The business flow stays
   consistent even with poison input.
-- **Replay:** manual only, documented in the README (`kafka-console-consumer` piped into
-  `kafka-console-producer` after a fix). Automated replay is out of scope.
+- **Replay:** `make dlt-replay TOPIC=<topic>` (`scripts/dlt-replay.sh`). It uses a consumer group
+  `dlt-replay-<topic>` and `--max-messages` equal to the backlog at start, so each dead letter is
+  re-sent once per run. The naive consumer-to-producer pipe was tried first and **looped**: a
+  record that still failed went DLT → topic → DLT 95 times in 2 minutes. Automated replay is out
+  of scope.
 
 ## Consequences
 
-- A poison message costs no stall: it isn't retried. A *transient* failure costs at most about 7s
-  (1 + 2 + 4) of partition stall before it's moved aside.
+- A poison message isn't retried, but it isn't free either. **Measured: about 0.4 s of partition stall
+  per poison record**, because after each failure the error handler seeks the partition back and
+  re-polls. Measured with a backlog queued: 51 poison records dead-lettered in 20 s on one partition
+  (about 2.5/s), while the payment-service group's lag stood at 43. A *transient* failure costs at
+  most about 7 s (1 + 2 + 4) before it's moved aside.
 - Without this handler, Spring Kafka's default retries 10 times with no delay, then logs and **skips**
   the record. Nothing is kept for inspection. `PoisonMessageE2EIT` showed exactly that before the fix.
 - Transient failures that last longer than the backoff end up in the DLT too. The saga's own

@@ -57,6 +57,7 @@ demonstrable correctness matter more than production completeness. Read
 ## Build and test
 
 ```bash
+make up-all     # full stack in Podman (images via Jib); make demo / chaos-inventory / trace / down
 make verify     # spotless check + compile (Error Prone) + unit + IT + e2e
 make test       # unit tests only
 ./mvnw -pl order-service spring-boot:run   # dev mode, after `make up`
@@ -81,3 +82,5 @@ relay batch or sweep must carry `sagaId` and `orderId` in MDC.
 - **Prove the problem first.** Write a failing test against naive mode, then fix it, then show it passing.
 - **Predict, then run.** Before an e2e run, write down the expected event sequence and the final DB state.
 - Paste real command output. Never claim something works without running it.
+- Edit scripts must fail loudly when a replacement doesn't match. Spotless reformats code, and silent
+  no-op edits caused two wrong runs in this repo's history (see PROGRESS.md, 4a/4b).

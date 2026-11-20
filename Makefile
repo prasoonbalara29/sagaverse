@@ -21,7 +21,7 @@ COMPOSE := podman compose
 PODMAN_BIN := $(shell command -v podman)
 MVN := ./mvnw -B -ntp
 
-.PHONY: help check-java check-podman up up-all images down ps logs topics consume build test verify fmt demo chaos-inventory
+.PHONY: help check-java check-podman up up-all images down ps logs topics consume build test verify fmt demo chaos-inventory trace dlt-replay
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*## "}{printf "  %-16s %s\n",$$1,$$2}'
@@ -53,6 +53,12 @@ demo: ## Place one order per scenario (happy, declined, out of stock) and print 
 
 chaos-inventory: ## Kill inventory mid-saga, watch the saga wait, restart it, watch it complete
 	@scripts/chaos-inventory.sh
+
+trace: ## Every log line of one saga across all three services, in time order: make trace SAGA=<id>
+	@scripts/trace.sh "$(SAGA)"
+
+dlt-replay: ## Re-send not-yet-replayed dead letters once: make dlt-replay TOPIC=payment.commands
+	@scripts/dlt-replay.sh "$(TOPIC)"
 
 down: ## Stop and remove all containers
 	$(COMPOSE) --profile apps down --remove-orphans

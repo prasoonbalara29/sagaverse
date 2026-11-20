@@ -65,3 +65,6 @@ logging:
   structured:
     format:
       console: ecs
+  level:
+    # Kafka clients print their whole config at INFO on every start. That's noise next to saga logs.
+    org.apache.kafka: WARN
