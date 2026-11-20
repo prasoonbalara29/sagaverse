@@ -129,7 +129,7 @@ Every message uses the envelope `{eventId, sagaId, type, version, occurredAt, pa
 | F1 | Payment declined | ✅ CANCELLED/FAILED, no money moved (`FailurePathsE2EIT`) | _TBD (Phase 4)_ |
 | F2 | Out of stock → refund | ✅ CANCELLED/COMPENSATED, ledger CHARGE 10 + REFUND −10 | _TBD (Phase 4)_ |
 | F3 | Duplicate delivery | _TBD_ | _TBD_ |
-| F4 | Lost event after crash (dual write) | _TBD_ | _TBD_ |
+| F4 | Lost event after crash (dual write) | ❌ `STUCK_SAGA`: PAYMENT_PENDING forever, ChargePayment never sent, 0 durable copies | ✅ COMPLETED; the command survived in the outbox (1 unsent row at crash) and the relay sent it after restart |
 | F5 | Consumer crash mid-saga | _TBD_ | _TBD_ |
 | F6 | Service down past deadline | _TBD_ | _TBD_ |
 | F7 | Poison message | ✅ sent straight to `<topic>.DLT` with the cause in its headers; later orders unaffected (`PoisonMessageE2EIT`). A poisoned *command* still leaves its saga waiting until the Phase 5 sweeper. | _TBD (Phase 5)_ |

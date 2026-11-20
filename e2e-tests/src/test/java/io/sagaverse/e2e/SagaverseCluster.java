@@ -93,6 +93,15 @@ final class SagaverseCluster implements AutoCloseable {
     running.put(s, s.app.get().run(args));
   }
 
+  /**
+   * Stops and starts one service, with the current overrides. This is how tests simulate a crash
+   * and restart.
+   */
+  void restart(Service s) {
+    stop(s);
+    start(s);
+  }
+
   void stop(Service s) {
     var ctx = running.remove(s);
     if (ctx != null) {

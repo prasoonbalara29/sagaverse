@@ -3,6 +3,7 @@ package io.sagaverse.order.messaging;
 import io.sagaverse.events.EventEnvelope;
 import io.sagaverse.events.EventType;
 import io.sagaverse.events.SagaPayload;
+import io.sagaverse.order.fault.FaultInjector;
 import java.time.Clock;
 import java.util.List;
 import java.util.UUID;
@@ -31,12 +32,14 @@ public class DirectKafkaPublisher implements MessagePublisher {
   private final KafkaTemplate<String, String> kafka;
   private final EnvelopeCodec codec;
   private final Clock clock;
+  private final FaultInjector faults;
 
   public DirectKafkaPublisher(
-      KafkaTemplate<String, String> kafka, EnvelopeCodec codec, Clock clock) {
+      KafkaTemplate<String, String> kafka, EnvelopeCodec codec, Clock clock, FaultInjector faults) {
     this.kafka = kafka;
     this.codec = codec;
     this.clock = clock;
+    this.faults = faults;
   }
 
   @Override
@@ -49,7 +52,8 @@ public class DirectKafkaPublisher implements MessagePublisher {
           new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-              // <-- a crash right here is the lost-event bug.
+              // <-- a crash right here is the lost-event bug (F4).
+              faults.beforePublish(EventType.of(messages.get(0)).wireName());
               sendAll(sagaId, messages);
             }
           });

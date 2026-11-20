@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 3 (failures and compensations) — done. Next: 4 (outbox, inbox, idempotency)
+## Current phase: 4a (outbox, F4) — done. Next: 4b (inbox + idempotency, F3)
 
 ### Phase checklist
 
@@ -17,11 +17,55 @@
 | 3a | Payment decline rule + RefundPayment, inventory ReleaseStock, tombstones | ✅ done |
 | 3b | F1/F2 e2e red first, then orchestrator FAILED / COMPENSATING / COMPENSATED | ✅ done |
 | 3c | Retry + DLT wiring, poison-message test (F7) | ✅ done |
-| 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | ⏳ next |
+| 4a | Transactional outbox + relay in all services, FaultInjector, InvariantChecker, F4 naive vs reliable | ✅ done |
+| 4b | Inbox + sagaId business idempotency, F3 naive vs reliable, default mode → reliable | ⏳ next |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 4a (transactional outbox, F4 lost event)
+**Test harness (ADR-0010):**
+- `InvariantChecker` reads all three DBs for a saga and reports `DOUBLE_CHARGE`, `UNREFUNDED_CHARGE`, `WRONG_CHARGE`,
+  `DOUBLE_RESERVATION`, `ORPHAN_RESERVATION` and `STUCK_SAGA` (non-terminal with its deadline passed), each with the numbers.
+- `ScenarioRunner` drives a scenario identically in both modes.
+- `ReliableModeE2EIT` asserts zero violations, and `NaiveModeE2EIT` asserts the specific violation.
+- `SagaverseCluster.restart(service)` simulates crash + restart.
+
+**F4 scenario:** order-service runs with `fault.crash-before-publish=true` (the new `FaultInjector`, off by default). The order
+is placed, then order-service is stopped and the unpublished outbox rows for the saga are counted. Then it's restarted
+without the fault, and the test waits up to 10 s.
+- Naive: the fault fires in the after-commit send, so the client gets a 500 after the commit.
+- Reliable: the fault fires in the relay, before the Kafka send.
+
+**Step 1: prove the problem.** I ran the reliable assertion (`isEmpty()`) against naive mode. Real output:
+```
+FAULT INJECTED: simulated crash after commit, before publishing ChargePayment
+Expecting empty but was: [STUCK_SAGA saga=7a7b9995… state=PAYMENT_PENDING order=PENDING deadline=2026-11-20T17:22:39Z]
+[ERROR] Tests run: 1, Failures: 1
+```
+**Step 2: fix.** `OutboxPublisher` (reliable) inserts the envelope into `outbox` inside the caller's transaction, and
+refuses to run without one. `OutboxRelay` (reliable, `@Scheduled` every `messaging.outbox.poll-interval-ms`=200) runs
+`SELECT … WHERE published_at IS NULL ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED`, does a synchronous send, sets
+`published_at`, and stops at the first failure to keep the order. Both live in all three services (payment and inventory
+replies were dual writes too). order-service's relay calls `FaultInjector.beforePublish`.
+
+**Step 3: same scenario, both modes.** Prediction: reliable completes with zero violations, naive stays PAYMENT_PENDING
+with exactly `STUCK_SAGA` and no payment row. **Result: matched.**
+
+**A gap I found and closed:** the first green run logged no `FAULT INJECTED` in reliable mode. The restart came before the
+relay's first 200 ms tick, so the "crash" happened through the stop, not the fault hook. It's still a real crash after
+commit, but nothing proved the command was unsent. The scenario now counts unpublished outbox rows right after stopping the
+service. Reliable asserts **1** (the command survived in the DB), naive asserts **0** (no durable copy exists). Both pass.
+
+Reliable log for the F4 saga after the restart: `order.OutboxRelay relayed ChargePayment` → `payment … charged 7.00` →
+`payment.OutboxRelay relayed PaymentCharged` → `… INVENTORY_PENDING` → `order.OutboxRelay relayed ReserveStock` →
+`inventory … reserved 1 x SKU-1` → `inventory.OutboxRelay relayed StockReserved` → `… COMPLETED`.
+```
+$ make verify
+Tests run: 1 ReliableModeE2EIT | 1 NaiveModeE2EIT | 3 PoisonMessageE2EIT | 2 FailurePathsE2EIT | 1 HappyPathE2EIT | ...
+BUILD SUCCESS   (65 tests)
+```
 
 ### Done in Phase 3c (retry + dead-letter, F7)
 **Step 1: prove the problem.** `PoisonMessageE2EIT` sends garbage to all 3 partitions of `payment.commands`, an unknown
@@ -51,7 +95,7 @@ dead-lettering inventory.commands-2@0: …EnvelopeCodec$UnknownMessageTypeExcept
 dead-lettering payment.replies-2@0: …EnvelopeCodec$UnsupportedVersionException: unsupported version 2 of PaymentDeclined
 $ make verify
 Tests run: 3 PoisonMessageE2EIT | 2 FailurePathsE2EIT | 1 HappyPathE2EIT | ...
-BUILD SUCCESS   (69 tests)
+BUILD SUCCESS   (63 tests; first reported as 69, which was a miscount, corrected in 4a)
 ```
 ADR-0007 now says "first attempt + 3 retries" (it said "3 attempts"), lists the real exception types and header names, and
 records what the default handler does without this config.
@@ -103,7 +147,7 @@ receiving that eventId. It looks like a log-capture artifact. Recheck in Phase 6
 ```
 $ make verify
 Tests run: 13 SagaStateMachineTest | 2 FailurePathsE2EIT | 1 HappyPathE2EIT | ...
-BUILD SUCCESS   (66 tests)
+BUILD SUCCESS   (60 tests; first reported as 66, which was a miscount, corrected in 4a)
 ```
 Also: `requests.http` gained F1 (amount 5000 > the dev limit of 1000) and F2 (SKU-EMPTY). The README results table now has F1/F2 (naive).
 
@@ -409,8 +453,7 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 4: reliability. Build the `InvariantChecker` (ADR-0010) and write F3 (duplicate delivery) and F4 (lost event after
-a crash between commit and send) e2e tests. Run them in naive mode and paste the red output: expect 2 CHARGE ledger rows /
-a doubled reservation for F3, and an order stuck PENDING with no ChargePayment for F4. Then add the outbox + relay, the inbox
-and sagaId business idempotency behind `saga.mode=reliable`, show the same scenarios green in reliable mode, and keep
-`NaiveModeE2EIT` asserting the violations. Probably split 4a (outbox, F4) / 4b (inbox, F3).
+Phase 4b: F3 duplicate delivery. Two flavors: (1) the exact same record redelivered (same eventId), (2) a logical resend
+(new eventId, same sagaId) of ChargePayment and ReserveStock. Show red first (expect DOUBLE_CHARGE + DOUBLE_RESERVATION), then
+add the inbox (eventId PK, in the handler's transaction) and sagaId business idempotency (reply with the stored outcome)
+behind `saga.mode=reliable`. Then switch the default `saga.mode` to reliable.

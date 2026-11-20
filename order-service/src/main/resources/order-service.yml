@@ -46,10 +46,17 @@ saga:
 # Retry + dead-letter policy (KafkaErrorHandling, ADR-0007): blocking retries after 1s, 2s, 4s,
 # then <topic>.DLT. Malformed / unknown-type / unsupported-version messages skip the retries.
 messaging:
+  # Reliable mode only: how often OutboxRelay looks for unpublished rows (ADR-0004).
+  outbox:
+    poll-interval-ms: 200
   retry:
     initial-interval: 1s
     multiplier: 2.0
     max-retries: 3
+
+# Deliberate failure points for the F4 demo (FaultInjector). Never on in a normal run.
+fault:
+  crash-before-publish: false
 
 management:
   endpoints:
