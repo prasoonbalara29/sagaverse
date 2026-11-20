@@ -1,6 +1,17 @@
 # PROGRESS
 
-## Current phase: 5 (timeouts, failures, containers, chaos) — done. Next: 6 (observability and docs)
+## Current phase: 6 (observability and docs) — done. The project is complete.
+
+### Definition of done (checked on 2026-11-21, from a fresh `git clone` of commit bb7b97d)
+
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | `make verify` passes from a clean checkout | Clean clone into a scratch dir, only `JAVA_HOME` set: exit 0, BUILD SUCCESS, 96 tests |
+| 2 | README steps work exactly as written | In the clean clone: `make up-all` (exit 0, 3 services Healthy) → `make demo` (3/3 as expected) → `make chaos-inventory` (COMPLETED) → `make trace SAGA=…` (full cross-service timeline) → `make down` (all 7 removed, 0 left) |
+| 3 | Every failure path has a passing e2e test, and naive fails the same scenarios | `ReliableModeE2EIT` (10 tests, 0 violations), `NaiveModeE2EIT` (9 tests asserting the specific violation). Table in README §5 |
+| 4 | `make chaos-inventory` shows kill, stuck saga, restart and completion | SIGKILL (exit 137) → attempts 1→2→3 while INVENTORY_PENDING → restart → COMPLETED, 1 reservation for 5 deliveries |
+| 5 | A saga can be traced by sagaId across all three services' logs | `make trace` output in README §4. Dead-letter lines carry the sagaId too (6a) |
+| 6 | Summary, three trickiest failure modes, production gaps, quiz | Delivered in chat at the end of Phase 6 |
 
 ### Phase checklist
 
@@ -22,9 +33,55 @@
 | 5a | Timeout sweeper + state machine timeouts + late-reservation rule, F5/F6 naive vs reliable | ✅ done |
 | 5b | F8 (refund fails transiently / forever → COMPENSATION_FAILED), F9 (late reservation after cancellation) | ✅ done |
 | 5c | Jib images, `make up-all`, `make chaos-inventory`, `make demo` | ✅ done |
-| 6 | Observability polish, `make trace`, full README, final summary + quiz | ⏳ next |
+| 6 | Observability polish, `make trace`, safe DLT replay, full README, final summary + quiz | ✅ done |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 6 (observability and docs)
+- **Traceable dead letters.** The DLT recoverer restores `orderId` (record key) and `sagaId` (regex on the value, else
+  `unknown`) into MDC before logging. Verified live: a version-2 ChargePayment with sagaId `aaaaaaaa-…` shows up in
+  `make trace` as `payment-service KafkaErrorHandling dead-lettering payment.commands-2@3: …UnsupportedVersionException`.
+  `KafkaErrorHandlingTest` (+2).
+- **`org.apache.kafka` logging at WARN** in all services (no more client config dumps).
+- **`make trace SAGA=<id>`** (`scripts/trace.sh`): merges the matching JSON lines from the three containers, sorted by
+  timestamp, as `time service logger message`. The "missing sent ChargePayment line" from 3b doesn't reproduce here: the
+  trace shows `OutboxRelay relayed ChargePayment` then `received ChargePayment` with the same eventId. The 3b gap was in
+  the failsafe report capture.
+- **DLT replay, a bug I found by running my own README.** The first README version documented
+  `kafka-console-consumer X.DLT | kafka-console-producer X`. When run against a record that still fails, it **looped**: the
+  record was dead-lettered again, re-read and replayed again, **95 times in 2 minutes**, until I killed it. I replaced it
+  with `make dlt-replay TOPIC=…` (`scripts/dlt-replay.sh`): consumer group `dlt-replay-<topic>` plus `--max-messages` = the
+  backlog at start, so each dead letter is replayed once per run. Tested:
+  - Run 1 replayed 95 and terminated in 4.8 s. Later runs picked up only the new backlog.
+  - Reconciliation after the lag drained: 289 version-2 copies on `payment.commands` partition 2 and 289 records on
+    `payment.commands.DLT`, so none were lost.
+- **Poison throughput, measured** while checking the replay: about 2.5 poison records/s per partition (each failure seeks
+  back and re-polls). ADR-0007 had claimed "no stall" for poison, which is now corrected. Also listed under README limitations.
+- **README rewritten for a first read:** the problem with reproduced numbers, the pattern in one minute, architecture,
+  happy and compensation sequences, the state machine, how to run in 5 commands (with real `make demo` / `make trace`
+  output), the measured naive-vs-reliable table, design decisions explained, trade-offs, limitations, what I'd do in
+  production, operating it (safe DLT replay), and the layout.
+- ADR-0007 (replay, poison cost), ADR-0011 (DLT MDC, Kafka WARN, trace) and AGENTS.md (up-all, the "edit scripts must fail
+  loudly" rule) updated.
+- `make verify`: BUILD SUCCESS, 96 tests (working copy, and again from the clean clone).
+
+### Final state
+- **Modules:** events (contracts), order-service (REST + orchestrator + sweeper), payment-service, inventory-service, e2e-tests.
+- **Tests (96):**
+  - Unit: 18 contract, 25 state machine, 5 codec, 2 DLT MDC.
+  - Service ITs: order 6, payment 7, inventory 8.
+  - e2e: reliable 10, naive 9, poison 3, failure paths 2, happy 1.
+- **Make targets:** up, up-all, images, down, ps, logs, topics, consume, build, test, verify, fmt, demo, chaos-inventory,
+  trace, dlt-replay.
+
+### Open issues and known limitations (none block the definition of done)
+See README §8. In short:
+- The relay and sweeper are single-instance.
+- There's no TTL for outbox, inbox and tombstones.
+- Images are about 594 MB (a full JDK base).
+- In-JVM e2e logs share one `service.name`.
+- Poison records cost about 0.4 s each of partition time.
+- `saga_instance.compensation_attempts` is unused (ADR-0009).
 
 ### Done in Phase 5c (containers, demo, chaos)
 - **Jib images** into Podman: `make images` runs `install` + `jib:dockerBuild -Djib.dockerClient.executable=$(command -v podman)`.
@@ -628,10 +685,4 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 6: observability and docs.
-- sagaId/orderId on the `dead-lettering …` lines (found missing in 5b).
-- `org.apache.kafka` logging set to WARN.
-- `make trace SAGA=<id>` greps all three services' logs.
-- README in full: problem, diagrams, run in ≤ 5 commands, the measured naive-vs-reliable table, trade-offs, limitations,
-  what I'd do in production, and a DLT replay command.
-- Final PROGRESS.md, the summary, and the five quiz questions.
+None planned. Ideas for going further are in README §9 ("What I'd do in production").
