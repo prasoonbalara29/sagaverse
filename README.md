@@ -5,7 +5,7 @@ A hands-on learning repo for the **saga pattern (orchestration)**. Three Spring 
 implementation corrupts data, then fixes it with a persisted saga, compensations, a transactional
 outbox, an inbox and a timeout sweeper. Every claim is backed by a test.
 
-> **Status:** Phase 2 (happy path works end to end in naive mode; failures and compensations come in Phase 3). See [PROGRESS.md](PROGRESS.md). Sections marked
+> **Status:** Phase 3 (happy path, payment declined and out-of-stock refund work end to end in naive mode). See [PROGRESS.md](PROGRESS.md). Sections marked
 > _TBD_ get filled in as phases land.
 
 ## The problem
@@ -126,8 +126,8 @@ Every message uses the envelope `{eventId, sagaId, type, version, occurredAt, pa
 
 | # | Scenario | Naive | Reliable |
 |---|---|---|---|
-| F1 | Payment declined | _TBD_ | _TBD_ |
-| F2 | Out of stock → refund | _TBD_ | _TBD_ |
+| F1 | Payment declined | ✅ CANCELLED/FAILED, no money moved (`FailurePathsE2EIT`) | _TBD (Phase 4)_ |
+| F2 | Out of stock → refund | ✅ CANCELLED/COMPENSATED, ledger CHARGE 10 + REFUND −10 | _TBD (Phase 4)_ |
 | F3 | Duplicate delivery | _TBD_ | _TBD_ |
 | F4 | Lost event after crash (dual write) | _TBD_ | _TBD_ |
 | F5 | Consumer crash mid-saga | _TBD_ | _TBD_ |

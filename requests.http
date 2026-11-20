@@ -22,6 +22,28 @@ Content-Type: application/json
 ### 4. Unknown order: 404
 GET http://localhost:8081/orders/does-not-exist
 
+### 5. F1 payment declined: amount above payment.decline-amount-over (1000.00 in dev) -> CANCELLED / FAILED
+POST http://localhost:8081/orders
+Content-Type: application/json
+
+{"customerId": "cust-1", "sku": "SKU-1", "quantity": 1, "amount": 5000.00}
+
+> {% client.global.set("declinedOrderId", response.body.orderId); %}
+
+###
+GET http://localhost:8081/orders/{{declinedOrderId}}
+
+### 6. F2 out of stock: charged, then refunded -> CANCELLED / COMPENSATED (SKU-EMPTY has 0 units)
+POST http://localhost:8081/orders
+Content-Type: application/json
+
+{"customerId": "cust-1", "sku": "SKU-EMPTY", "quantity": 1, "amount": 10.00}
+
+> {% client.global.set("oosOrderId", response.body.orderId); %}
+
+###
+GET http://localhost:8081/orders/{{oosOrderId}}
+
 ### Health of each service
 GET http://localhost:8081/actuator/health
 
@@ -31,5 +53,4 @@ GET http://localhost:8082/actuator/health
 ###
 GET http://localhost:8083/actuator/health
 
-# Coming in later phases: payment declined (Phase 3), out of stock -> refund (Phase 3),
-# duplicate delivery and crash scenarios (Phases 4-5).
+# Coming in later phases: duplicate delivery and crash scenarios (Phases 4-5).

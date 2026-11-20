@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 3a (compensation handlers) — done. Next: 3b (orchestrator failure transitions)
+## Current phase: 3b (orchestrator failure transitions) — done. Next: 3c (retry + DLT)
 
 ### Phase checklist
 
@@ -15,13 +15,61 @@
 | 2c | Per-service config name + migration folder, so all three jars can share one classpath | ✅ done |
 | 2d | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ✅ done |
 | 3a | Payment decline rule + RefundPayment, inventory ReleaseStock, tombstones | ✅ done |
-| 3b | F1/F2 e2e red first, then orchestrator FAILED / COMPENSATING / COMPENSATED | ⏳ next |
-| 3c | Retry + DLT wiring, poison-message test (F7) | pending |
+| 3b | F1/F2 e2e red first, then orchestrator FAILED / COMPENSATING / COMPENSATED | ✅ done |
+| 3c | Retry + DLT wiring, poison-message test (F7) | ⏳ next |
 | 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 3b (orchestrator failure transitions)
+**Step 1: prove the problem.** I wrote `FailurePathsE2EIT` (F1, F2) and ran it against the Phase 3a orchestrator, which ignored
+`PaymentDeclined` and `StockUnavailable`. Prediction: F1 stuck in PAYMENT_PENDING; F2 stuck in INVENTORY_PENDING with the
+customer charged. Real output:
+```
+[order/saga for 6395d4ce…; payment ledger=[]]
+expected: "CANCELLED/FAILED"
+ but was: "PENDING/PAYMENT_PENDING" within 20 seconds.
+
+[order/saga for 4c9fbacb…; payment ledger=[{entry_type=CHARGE, amount=10.00}]]
+expected: "CANCELLED/COMPENSATED"
+ but was: "PENDING/INVENTORY_PENDING" within 20 seconds.
+[ERROR] Tests run: 2, Failures: 0, Errors: 2
+```
+F2's red run shows the exact inconsistency from the brief: **money taken for an order that can't be fulfilled**.
+
+**Step 2: fix.**
+- `SagaStateMachine`:
+  - `PAYMENT_PENDING + PaymentDeclined → FAILED` (order CANCELLED, nothing to undo).
+  - `INVENTORY_PENDING + StockUnavailable → COMPENSATING`, sending `RefundPayment` and recording `compensationsPending=[RefundPayment]`.
+  - In COMPENSATING, `PaymentRefunded` / `StockReleased` acknowledge one compensation. The last ack gives
+    `COMPENSATED` (order CANCELLED). Otherwise it keeps waiting, with the deadline unchanged.
+  - A duplicate ack, or a decline/unavailable in the wrong state, is ignored.
+- `SagaInstance.compensationsPending`, persisted as the JSONB `saga_instance.compensations_pending` (`SagaRepository`).
+- `SagaStateMachineTest`: the pinned "failure replies not handled yet" test was deliberately replaced by 6 transition tests (13 total).
+
+**Step 3: same tests green.** Predicted: F1 `ChargePayment → PaymentDeclined` gives CANCELLED/FAILED, payment DECLINED, no ledger,
+no reservation, stock unchanged. F2 `ChargePayment → PaymentCharged → ReserveStock → StockUnavailable → RefundPayment →
+PaymentRefunded` gives CANCELLED/COMPENSATED, ledger `[CHARGE 10.00, REFUND -10.00]`, no reservation, SKU-EMPTY still 0.
+**Result: matched.** Logs for the F2 saga, from the run:
+```
+payment.PaymentService            charged 10.00 to cust-e2e
+order.SagaOrchestrator            saga PAYMENT_PENDING -> INVENTORY_PENDING on PaymentCharged
+inventory.InventoryService        cannot reserve 1 x SKU-EMPTY: out of stock
+order.DirectKafkaPublisher        sent RefundPayment to payment.commands
+order.SagaOrchestrator            saga INVENTORY_PENDING -> COMPENSATING on StockUnavailable (awaiting [RefundPayment])
+payment.PaymentService            refunded 10.00 to cust-e2e (OUT_OF_STOCK)
+order.SagaOrchestrator            saga COMPENSATING -> COMPENSATED on PaymentRefunded
+```
+(The F2 saga's initial "sent ChargePayment" line is missing from the captured failsafe report, although payment logged
+receiving that eventId. It looks like a log-capture artifact. Recheck in Phase 6.)
+```
+$ make verify
+Tests run: 13 SagaStateMachineTest | 2 FailurePathsE2EIT | 1 HappyPathE2EIT | ...
+BUILD SUCCESS   (66 tests)
+```
+Also: `requests.http` gained F1 (amount 5000 > the dev limit of 1000) and F2 (SKU-EMPTY). The README results table now has F1/F2 (naive).
 
 ### Done in Phase 3a (payment + inventory compensation handlers)
 - **Fake gateway** (`FakeGateway` + `PaymentProperties`): `payment.decline-amount-over` (default 1000.00, deterministic)
@@ -325,6 +373,8 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 3b: write F1 (payment declined) and F2 (out of stock → refund) as e2e tests and run them on today's orchestrator,
-which ignores PaymentDeclined / StockUnavailable. Expect red: F1 stuck in PAYMENT_PENDING, F2 stuck in INVENTORY_PENDING
-**with the customer charged**. Then add the FAILED / COMPENSATING / COMPENSATED transitions and show the same tests green.
+Phase 3c: retry + dead-letter (ADR-0007) in all three services. `DefaultErrorHandler` with blocking exponential backoff,
+with `MessageRejectedException` (malformed, unknown type, unsupported version) non-retryable, and a
+`DeadLetterPublishingRecoverer` to `<topic>.DLT`. Prove first: a poison message on `payment.commands` today is retried
+10 times and then silently skipped (logged only). After: it lands on `payment.commands.DLT` with exception headers,
+and later messages on the partition still flow.

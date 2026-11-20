@@ -9,6 +9,7 @@ import io.sagaverse.order.saga.SagaStateMachine.Decision;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,7 +66,7 @@ public class SagaOrchestrator {
         orders.insert(order);
         sagas.insert(
             new SagaInstance(
-                sagaId, orderId, d.to(), d.nextStep(), 1, d.deadlineAt(), 0, now, now));
+                sagaId, orderId, d.to(), d.nextStep(), 1, List.of(), d.deadlineAt(), 0, now, now));
         sagas.recordTransition(sagaId, null, d.to(), d.trigger(), now);
         publisher.publish(sagaId, d.commands());
       });
@@ -97,6 +98,7 @@ public class SagaOrchestrator {
                   decision.to(),
                   decision.nextStep(),
                   attempts,
+                  decision.compensationsPending(),
                   decision.deadlineAt(),
                   saga.version(),
                   saga.createdAt(),
@@ -114,7 +116,12 @@ public class SagaOrchestrator {
     if (d.ignored()) {
       log.warn("ignored {}: {}", reply.type(), d.ignoredReason());
     } else {
-      log.info("saga {} -> {} on {}", d.from(), d.to(), d.trigger());
+      log.info(
+          "saga {} -> {} on {}{}",
+          d.from(),
+          d.to(),
+          d.trigger(),
+          d.compensationsPending().isEmpty() ? "" : " (awaiting " + d.compensationsPending() + ")");
     }
   }
 }

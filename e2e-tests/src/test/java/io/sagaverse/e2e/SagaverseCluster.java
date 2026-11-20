@@ -50,6 +50,7 @@ final class SagaverseCluster implements AutoCloseable {
   private final String mode;
   private final Map<Service, ConfigurableApplicationContext> running = new EnumMap<>(Service.class);
   private final Map<Service, JdbcTemplate> dbs = new EnumMap<>(Service.class);
+  private final Map<Service, Map<String, Object>> overrides = new EnumMap<>(Service.class);
 
   /**
    * @param mode value of {@code saga.mode} for every service: "naive" or "reliable"
@@ -60,6 +61,12 @@ final class SagaverseCluster implements AutoCloseable {
     this.mode = mode;
     createDatabases();
     createTopics();
+  }
+
+  /** Extra config for one service, e.g. a failure trigger. Applies to the next {@link #start}. */
+  SagaverseCluster with(Service s, String key, Object value) {
+    overrides.computeIfAbsent(s, k -> new HashMap<>()).put(key, value);
+    return this;
   }
 
   SagaverseCluster startAll() {
@@ -77,6 +84,7 @@ final class SagaverseCluster implements AutoCloseable {
     props.put("spring.datasource.password", postgres.getPassword());
     props.put("spring.kafka.bootstrap-servers", kafka.getBootstrapServers());
     props.put("saga.mode", mode);
+    props.putAll(overrides.getOrDefault(s, Map.of()));
     // Command-line style args beat the service's yml, so these win over its dev defaults.
     String[] args =
         props.entrySet().stream()
