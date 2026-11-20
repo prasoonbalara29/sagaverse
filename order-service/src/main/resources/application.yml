@@ -20,6 +20,9 @@ spring:
       # Offsets are committed only after the DB transaction commits (ADR-0005).
       enable-auto-commit: false
       auto-offset-reset: earliest
+    listener:
+      # One record at a time. The offset is committed after the handler (and its DB transaction) returns.
+      ack-mode: record
     producer:
       acks: all
       properties:
@@ -30,6 +33,14 @@ spring:
       use-big-decimal-for-floats: true
     serialization:
       write-dates-as-timestamps: false
+
+# Saga tuning (SagaProperties, ADR-0009/0010). Phase 2 runs in naive mode only.
+saga:
+  mode: naive
+  step-timeout: 10s
+  max-step-attempts: 6
+  max-compensation-attempts: 10
+  sweep-interval: 2s
 
 management:
   endpoints:

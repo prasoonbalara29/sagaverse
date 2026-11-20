@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 1c (service skeletons) — done. Next: 2 (happy path)
+## Current phase: 2a (orchestrator + order API) — done. Next: 2b (handlers + e2e)
 
 ### Phase checklist
 
@@ -10,13 +10,78 @@
 | 1a | `./mvnw`, parent POM (enforcer, Spotless, Error Prone, Jib), `events` module + `EnvelopeTest` | ✅ done |
 | 1b | `compose.yaml` (Postgres + 3 DBs/users, Kafka KRaft, topics-init), Makefile | ✅ done |
 | 1c | 3 service skeletons, Flyway V1, actuator health, `*ApplicationIT` (Testcontainers) | ✅ done |
-| 2 | Happy path end to end (naive mode), `.http` file, `HappyPathE2EIT` | ⏳ next |
+| 2a | Order API, orchestrator state machine (happy path), naive publisher, reply listener, `OrderSagaHappyPathIT` | ✅ done |
+| 2b | Payment + inventory command handlers, `e2e-tests` module, `HappyPathE2EIT`, `requests.http` | ⏳ next |
 | 3 | Declines and compensations (F1, F2, F7 naive) | pending |
 | 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 2a (order-service only; payment and inventory handlers come in 2b)
+- **`SagaStateMachine`**: a pure function from (saga, reply) to `Decision` (from, to, trigger, next step,
+  deadline, order status, commands, or ignored with a reason). No DB and no Kafka, so every transition is
+  unit-tested without containers. Happy path only: `start → PAYMENT_PENDING (ChargePayment)`,
+  `PaymentCharged → INVENTORY_PENDING (ReserveStock)`, `StockReserved → COMPLETED (order CONFIRMED)`.
+  Any other reply, or a reply in the wrong state, is ignored with a reason. That includes `PaymentDeclined`
+  and `StockUnavailable`, which a test pins until Phase 3 adds them.
+- **`SagaOrchestrator`**: one `TransactionTemplate` transaction updates the saga (optimistic `version`), the order
+  status and `saga_transition`, and hands the commands to `MessagePublisher`.
+- **`MessagePublisher`**: the seam for ADR-0010. The only implementation so far is **`DirectKafkaPublisher` (naive)**.
+  It registers an `afterCommit` callback and sends then. That is the dual write, commit then send, with a comment
+  marking where a crash loses the event (F4, demonstrated in Phase 4).
+- **`EnvelopeCodec`**: two-step decode (raw tree, check type and version, then convert). It rejects malformed,
+  unknown-type and future-version messages with `MessageRejectedException` subtypes. The DLT routing that uses
+  them comes in Phase 3.
+- **`ReplyListener`**: `@KafkaListener` on `payment.replies` + `inventory.replies`, `ack-mode: record`. It puts
+  `orderId`/`sagaId` into MDC.
+- **REST**: `POST /orders` → 202 with a `Location` header (Bean Validation: 400 on a bad body). `GET /orders/{id}` →
+  the order plus saga state, step, attempts, deadline and full transition history.
+- **Config**: `SagaProperties` (`saga.mode/step-timeout/max-step-attempts/max-compensation-attempts/sweep-interval`),
+  a `Clock` bean, and a Jackson customizer for exact-BigDecimal tree nodes (the open issue from 1b, now closed).
+- Tests: `SagaStateMachineTest` (8), `EnvelopeCodecTest` (5), `OrderSagaHappyPathIT` (3, with the test playing
+  payment and inventory over real Kafka).
+- 18 files touched (above the ~15 guideline). The state machine, orchestrator and their tests are one unit,
+  and splitting them would leave a phase that can't be tested end to end.
+
+### Predict, then run: `OrderSagaHappyPathIT`
+Predicted:
+1. POST gives 202, order PENDING, saga PAYMENT_PENDING (step ChargePayment, attempts 1, deadline now+10s),
+   transition `null → PAYMENT_PENDING`.
+2. `ChargePayment(orderId, cust-1, 42.50)` on `payment.commands`, keyed by orderId, with the same sagaId.
+3. After `PaymentCharged`: saga INVENTORY_PENDING, and `ReserveStock(orderId, SKU-1, 2)` on `inventory.commands`.
+4. After `StockReserved`: saga COMPLETED, deadline null, order CONFIRMED, exactly 3 transitions.
+
+Result: **matched, no differences.**
+
+### Real output (Phase 2a)
+```
+$ make verify
+Tests run: 18 ... EnvelopeTest
+Tests run: 8  ... SagaStateMachineTest
+Tests run: 5  ... EnvelopeCodecTest
+Tests run: 3  ... OrderServiceApplicationIT
+Tests run: 3  ... OrderSagaHappyPathIT
+Tests run: 3  ... PaymentServiceApplicationIT
+Tests run: 4  ... InventoryServiceApplicationIT
+BUILD SUCCESS
+
+Log lines from OrderSagaHappyPathIT (ECS JSON; sagaId/orderId are top-level fields on each):
+{sagaId: 54cfee77…, orderId: 5cb00751…} DirectKafkaPublisher | sent ChargePayment to payment.commands
+{sagaId: 54cfee77…, orderId: 5cb00751…} SagaOrchestrator     | order placed, saga started in PAYMENT_PENDING
+{sagaId: 54cfee77…, orderId: 5cb00751…} DirectKafkaPublisher | sent ReserveStock to inventory.commands
+{sagaId: 54cfee77…, orderId: 5cb00751…} SagaOrchestrator     | saga PAYMENT_PENDING -> INVENTORY_PENDING on PaymentCharged
+{sagaId: 54cfee77…, orderId: 5cb00751…} SagaOrchestrator     | saga INVENTORY_PENDING -> COMPLETED on StockReserved
+```
+
+### Decisions made in 2a
+- The naive publisher sends from an `afterCommit` transaction callback, so the orchestrator code is the **same
+  in both modes**. In Phase 4 the reliable publisher only swaps the bean (an outbox insert inside the same
+  transaction). Seeing that the same call site is unsafe or safe depending only on the publisher is the lesson.
+- I used Spring's `org.springframework.lang.Nullable`. `jspecify` isn't on the approved dependency list, and Spring 6.2
+  doesn't pull it in.
+- A reply for an unknown saga is logged and dropped (WARN). It can't be compensated, because there's no saga to drive.
 
 ### Done in Phase 1c
 - `order-service` (8081), `payment-service` (8082) and `inventory-service` (8083):
@@ -131,13 +196,14 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   `~/.m2/settings.xml` mirror.
 
 ### Open issues
-- Jackson `JsonNodeFactory.withExactBigDecimals(true)` can't be set via properties. Phase 2 adds a mapper customizer
-  in each service (ADR-0011).
+- payment and inventory still need the same exact-BigDecimal Jackson customizer (2b).
+- `DefaultErrorHandler` + DLT routing for `MessageRejectedException` isn't wired yet (Phase 3). Today a poison reply
+  is retried by Spring Kafka's default backoff (10 attempts), then skipped and logged.
 - Jib runs on the host JDK. Pulling the base image from `docker.intuit.com` should work, but that's untested until Phase 5.
 - `podman compose` delegates to Rancher Desktop's `docker-compose` v5 binary, pointed at the Podman socket. It works,
   but it prints a banner on every call.
 
 ### Next step
-Phase 2: happy path in naive mode. `POST /orders`, the orchestrator state machine (unit-tested per transition),
-the payment and inventory command handlers, the `e2e-tests` module and `HappyPathE2EIT`, and `requests.http`.
-Phase 2 will be well over 15 files, so I'll propose a split (2a: orchestrator + order API, 2b: handlers + e2e) when I start it.
+Phase 2b: payment-service `ChargePayment` handler (fake gateway, ledger) and inventory-service `ReserveStock` handler
+(stock decrement, reservation), both naive. Then the `e2e-tests` module booting all three apps in one JVM, `HappyPathE2EIT`,
+and `requests.http`.
