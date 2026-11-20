@@ -5,7 +5,7 @@ A hands-on learning repo for the **saga pattern (orchestration)**. Three Spring 
 implementation corrupts data, then fixes it with a persisted saga, compensations, a transactional
 outbox, an inbox and a timeout sweeper. Every claim is backed by a test.
 
-> **Status:** Phase 1c (skeletons: infra plus three services with health checks; no saga yet). See [PROGRESS.md](PROGRESS.md). Sections marked
+> **Status:** Phase 2 (happy path works end to end in naive mode; failures and compensations come in Phase 3). See [PROGRESS.md](PROGRESS.md). Sections marked
 > _TBD_ get filled in as phases land.
 
 ## The problem
@@ -149,7 +149,8 @@ make build     # install modules locally
 curl localhost:8081/actuator/health           # 8082 payment, 8083 inventory
 ```
 
-_The full 5-command demo arrives in Phase 5/6._
+Then run the requests in [`requests.http`](requests.http) (IntelliJ HTTP client) to place an order and watch
+its saga with `GET /orders/{id}`. _The full 5-command demo arrives in Phase 5/6._
 
 ## Trade-offs, known limitations, what I'd do in production
 

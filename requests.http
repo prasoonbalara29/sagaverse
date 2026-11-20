@@ -1,0 +1,35 @@
+# Sagaverse requests. Run them from IntelliJ's HTTP client, or copy them as curl commands.
+# Prerequisite: `make up`, then the three services (dev mode: ./mvnw -pl <svc> spring-boot:run).
+# Ports: order 8081, payment 8082, inventory 8083.
+
+### 1. Happy path: charge 42.50, reserve 2 x SKU-1, order ends CONFIRMED
+POST http://localhost:8081/orders
+Content-Type: application/json
+
+{"customerId": "cust-1", "sku": "SKU-1", "quantity": 2, "amount": 42.50}
+
+> {% client.global.set("orderId", response.body.orderId); %}
+
+### 2. Watch the saga: status, saga.state, saga.transitions
+GET http://localhost:8081/orders/{{orderId}}
+
+### 3. Invalid request: 400, no saga started
+POST http://localhost:8081/orders
+Content-Type: application/json
+
+{"customerId": "cust-1", "sku": "SKU-1", "quantity": 0, "amount": 42.50}
+
+### 4. Unknown order: 404
+GET http://localhost:8081/orders/does-not-exist
+
+### Health of each service
+GET http://localhost:8081/actuator/health
+
+###
+GET http://localhost:8082/actuator/health
+
+###
+GET http://localhost:8083/actuator/health
+
+# Coming in later phases: payment declined (Phase 3), out of stock -> refund (Phase 3),
+# duplicate delivery and crash scenarios (Phases 4-5).

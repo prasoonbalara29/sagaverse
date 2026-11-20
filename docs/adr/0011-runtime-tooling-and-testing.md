@@ -38,6 +38,11 @@ Surefire (`*Test`), Failsafe (`*IT`).
   container. A "crash" means closing a service's context mid-saga and starting a new one. That's fast
   and deterministic, with no container orchestration inside tests. To make this work, service
   modules produce a plain jar, and the Boot repackage step uses the `exec` classifier.
+  To share one classpath, each service reads `<svc>-service.yml` (`spring.config.name`) instead of
+  `application.yml`, and keeps its migrations in `db/migration/<svc>/`. Logging is JVM-global, so in
+  e2e runs the ECS `service.name` field shows the first-started service on every line. Use the logger
+  name (`io.sagaverse.<svc>.…`) to tell services apart there. Separate processes (dev mode,
+  containers) label correctly.
 - Awaitility for every async wait. `Thread.sleep` is forbidden.
 - Testcontainers targets **Podman** via `DOCKER_HOST` (exported by the Makefile from `podman machine
   inspect`). It never falls back to another Docker-compatible runtime.

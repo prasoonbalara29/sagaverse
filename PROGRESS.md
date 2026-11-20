@@ -1,6 +1,6 @@
 # PROGRESS
 
-## Current phase: 2c (one-classpath refactor) — done. Next: 2d (e2e module)
+## Current phase: 2 (happy path) — done. Next: 3 (failures and compensations)
 
 ### Phase checklist
 
@@ -13,13 +13,55 @@
 | 2a | Order API, orchestrator state machine (happy path), naive publisher, reply listener, `OrderSagaHappyPathIT` | ✅ done |
 | 2b | Payment + inventory command handlers (naive), per-service command ITs | ✅ done |
 | 2c | Per-service config name + migration folder, so all three jars can share one classpath | ✅ done |
-| 2d | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ⏳ next |
-| 3 | Declines and compensations (F1, F2, F7 naive) | pending |
+| 2d | `e2e-tests` module booting all three apps, `HappyPathE2EIT`, `requests.http` | ✅ done |
+| 3 | Declines and compensations (F1, F2, F7 naive) | ⏳ next |
 | 4 | Outbox, inbox, idempotency (F3, F4: red on naive first, then green on reliable) | pending |
 | 5 | Sweeper, timeouts, crash recovery (F5, F6, F8, F9), Jib images, `make up-all`, `make chaos-inventory` | pending |
 | 6 | Observability polish, `make trace`, full README, final summary + quiz | pending |
 
 1b was split from the original plan: infra in 1b, services in 1c. Together they'd have been about 20 files.
+
+### Done in Phase 2d (e2e module)
+- `e2e-tests` module (tests only). It depends on the three services' plain jars.
+- `SagaverseCluster`: creates `order_db`/`payment_db`/`inventory_db` on one Testcontainers Postgres and all 8 topics on one
+  Kafka. It starts each service with `XServiceApplication.application()` in its own context (random port, its own DB,
+  `saga.mode` chosen by the test). `stop(service)`/`start(service)` are ready for the Phase 5 crash tests. `db(service)` gives
+  direct JDBC access for assertions, which also works while a service is stopped.
+- `HappyPathE2EIT`: POST an order over HTTP to the real order-service and wait for CONFIRMED, then assert all three DBs.
+- `requests.http`: happy path, watch the saga, 400, 404, and the three health checks. The README links it.
+- ADR-0011 now records the one-classpath rules and the in-JVM `service.name` caveat.
+
+### Predict, then run: `HappyPathE2EIT`
+Predicted events: ChargePayment (order→payment), PaymentCharged (payment→order), ReserveStock (order→inventory),
+StockReserved (inventory→order). Final state: order_db order CONFIRMED / saga COMPLETED / 3 transitions;
+payment_db 1 payment CHARGED 19.99 + exactly 1 ledger CHARGE 19.99; inventory_db SKU-2 10→7, reservation RESERVED qty 3.
+Flagged risk: JVM-global logging, so `service.name` may be wrong in-JVM.
+
+Result: **matched.** The risk turned out real but small. Logs for one sagaId, from the e2e run:
+```
+order-service  order.messaging.DirectKafkaPublisher      sent ChargePayment to payment.commands
+order-service  order.saga.SagaOrchestrator               order placed, saga started in PAYMENT_PENDING
+order-service  payment.messaging.CommandListener         received ChargePayment
+order-service  payment.payment.PaymentService            charged 19.99 to cust-e2e
+order-service  payment.messaging.DirectKafkaPublisher    sent PaymentCharged to payment.replies
+order-service  order.messaging.DirectKafkaPublisher      sent ReserveStock to inventory.commands
+order-service  order.saga.SagaOrchestrator               saga PAYMENT_PENDING -> INVENTORY_PENDING on PaymentCharged
+order-service  inventory.messaging.CommandListener       received ReserveStock
+order-service  inventory.stock.InventoryService          reserved 3 x SKU-2
+order-service  inventory.messaging.DirectKafkaPublisher  sent StockReserved to inventory.replies
+order-service  order.saga.SagaOrchestrator               saga INVENTORY_PENDING -> COMPLETED on StockReserved
+```
+(The first column is the ECS `service.name`, the same for every context in one JVM. The logger package identifies the service.)
+
+```
+$ make verify
+Tests run: 18 EnvelopeTest | 8 SagaStateMachineTest | 5 EnvelopeCodecTest
+Tests run: 3 OrderServiceApplicationIT | 3 OrderSagaHappyPathIT
+Tests run: 3 PaymentServiceApplicationIT | 1 PaymentCommandsIT
+Tests run: 4 InventoryServiceApplicationIT | 2 InventoryCommandsIT
+Tests run: 1 HappyPathE2EIT (9.7 s)
+BUILD SUCCESS   (54 tests)
+```
 
 ### Done in Phase 2c (refactor, no behavior change)
 **Why:** the e2e module boots all three services in one JVM (ADR-0011), so their jars share one classpath. Each jar had
@@ -253,6 +295,7 @@ $ make verify    # openjdk version "21.0.10" ... Tests run: 18, Failures: 0 ... 
   but it prints a banner on every call.
 
 ### Next step
-Phase 2d: the `e2e-tests` module boots order, payment and inventory in one JVM (separate contexts and DBs) against
-one Testcontainers Kafka + Postgres. `HappyPathE2EIT` places an order over HTTP and asserts the final state of all three
-DBs. Plus `requests.http`.
+Phase 3: failures and compensations. First write F1 (payment declined) and F2 (out of stock → refund) as e2e tests and
+show them failing on today's code. Today the saga just sits in PAYMENT_PENDING / INVENTORY_PENDING, because the state
+machine ignores those replies. Then add the fake gateway's decline rule, RefundPayment / ReleaseStock (with the RELEASED
+tombstone), the orchestrator transitions to FAILED / COMPENSATING / COMPENSATED, and DLT wiring for poison messages (F7).
