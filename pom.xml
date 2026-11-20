@@ -36,7 +36,7 @@
     <enforcer.version>3.7.0</enforcer.version>
 
     <!-- Base image for service containers. Change it if you choose a different JDK distribution. -->
-    <jib.base.image>docker.io/library/amazoncorretto:21</jib.base.image>
+    <jib.base.image>docker.intuit.com/docker-rmt/library/amazoncorretto:21</jib.base.image>
   </properties>
 
   <dependencyManagement>

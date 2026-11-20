@@ -44,15 +44,21 @@ Surefire (`*Test`), Failsafe (`*IT`).
 
 **Containers and compose (Podman):**
 
+Public Docker Hub (`docker.io`) is blocked on this network: Zscaler TLS inspection, and the Podman VM doesn't
+trust its CA. Every Docker Hub image therefore comes through the internal mirror
+**`docker.intuit.com/docker-rmt/<namespace>/<image>:<tag>`** (official images use the `library/` namespace).
+Testcontainers uses the same mirror via `hub.image.name.prefix`. Redpanda Console and AKHQ are not
+available on the mirror, so the opt-in Kafka UI profile was dropped. Use `make topics` and
+`make consume TOPIC=…` instead.
+
 | Service | Image | Memory limit |
 |---|---|---|
-| postgres | `docker.io/library/postgres:17-alpine` (init script creates 3 DBs + 3 users) | 256m |
-| kafka | `docker.io/apache/kafka:3.9.x` (KRaft, single broker, `KAFKA_HEAP_OPTS=-Xmx512m -Xms512m`) | 768m |
+| postgres | `docker.intuit.com/docker-rmt/library/postgres:17-alpine` (init script creates 3 DBs + 3 users) | 256m |
+| kafka | `docker.intuit.com/docker-rmt/apache/kafka:3.9.2` (KRaft, single broker, `KAFKA_HEAP_OPTS=-Xmx512m -Xms512m`) | 768m |
 | topics-init | same Kafka image, runs once | 256m |
-| order/payment/inventory | Jib images (base `jib.base.image`, default `docker.io/library/amazoncorretto:21`), `-Xmx256m` | 384m each |
-| console (profile `ui`) | `docker.redpanda.com/redpandadata/console` | 256m |
+| order/payment/inventory | Jib images (base `jib.base.image`, default `docker.intuit.com/docker-rmt/library/amazoncorretto:21`), `-Xmx256m` | 384m each |
 
-That's about 2.3 GB with everything up. Healthchecks are on every long-running service. Ordering uses
+That's about 2.1 GB with everything up. Healthchecks are on every long-running service. Ordering uses
 `depends_on: condition: service_healthy` and `service_completed_successfully` (topics-init).
 
 **Run modes:** dev (`make up` starts infra; services run via `./mvnw -pl <svc> spring-boot:run`) and

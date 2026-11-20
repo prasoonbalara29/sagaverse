@@ -48,7 +48,8 @@ demonstrable correctness matter more than production completeness. Read
 
 ## Containers
 
-- **Podman only.** Use fully qualified image names (`docker.io/...`).
+- **Podman only.** Use fully qualified image names from the internal mirror:
+  `docker.intuit.com/docker-rmt/...`. Public `docker.io` is blocked (ADR-0011).
 - Testcontainers must target the Podman socket. The Makefile exports `DOCKER_HOST` from
   `podman machine inspect`. Don't let tools fall back to another Docker-compatible runtime that may
   also be installed.
